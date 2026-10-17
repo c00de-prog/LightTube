@@ -1,0 +1,45 @@
+# Python: виртуальное окружение
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# Python: скомпилированные файлы и кэш
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Временные файлы и скачанные медиа от yt-dlp / ffmpeg
+*.mp4
+*.m4a
+*.webm
+*.mkv
+*.part
+*.ytdl
+*.temp
+
+# Файлы конфигурации и секреты (API ключи, окружение)
+.env
+*.local
+config.json
+
+# Логи и временные процессы
+*.log
+*.pid
+
+# IDE и редакторы кода
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Кэш тестов и билдов (на будущее)
+.pytest_cache/
+.coverage
+build/
+dist/
+*.egg-info/
