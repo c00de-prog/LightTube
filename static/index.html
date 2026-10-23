@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#0f0f0f"><title>LightTube</title><link rel="stylesheet" href="/static/style.css"></head>
+<body>
+<svg class="svg-defs" aria-hidden="true"><defs>
+<symbol id="i-menu" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+<symbol id="i-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v11h-6v-7H9v7H3Z"/></symbol>
+<symbol id="i-history" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 3 8M3 4v7h7M12 7v6l4 2"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 10a8 8 0 1 0-1 7M20 3v7h-7"/></symbol>
+<symbol id="i-code" viewBox="0 0 24 24"><path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-15-2 18"/></symbol>
+<symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" stroke-width="4"/></symbol>
+<symbol id="i-stop" viewBox="0 0 24 24"><path d="M6 6h12v12H6Z"/></symbol>
+<symbol id="i-volume" viewBox="0 0 24 24"><path d="M3 9h4l5-4v14l-5-4H3Zm13-2a7 7 0 0 1 0 10m3-13a11 11 0 0 1 0 16"/></symbol>
+<symbol id="i-muted" viewBox="0 0 24 24"><path d="M3 9h4l5-4v14l-5-4H3Zm13 0 6 6m0-6-6 6"/></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="m10 2 4 0 1 3 3 1 3-1 2 4-2 2v3l2 2-2 4-3-1-3 1-1 3h-4l-1-3-3-1-3 1-2-4 2-2v-3L1 9l2-4 3 1 3-1Z" transform="translate(0 -1) scale(1 .96)"/></symbol>
+<symbol id="i-mini" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 12h7v6h-7Z"/></symbol>
+<symbol id="i-expand" viewBox="0 0 24 24"><path d="M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5"/></symbol>
+<symbol id="i-back" viewBox="0 0 24 24"><path d="m10 4-6 5 6 4M4 9h8a7 7 0 1 1-6 11"/></symbol>
+</defs></svg>
+<header class="topbar">
+  <div class="brand-group"><button id="menu-toggle" class="icon-button" type="button" aria-label="Меню" aria-expanded="true"><svg><use href="#i-menu"/></svg></button>
+    <a id="brand-home" class="brand" href="/" aria-label="LightTube — главная"><span class="brand-mark">▶</span><span>LightTube</span><sup>BETA</sup></a></div>
+  <form id="search-form" class="search-form" role="search"><input id="search-query" type="search" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="search-suggestions" aria-label="Поиск видео" placeholder="Введите запрос" maxlength="160" autocomplete="off" spellcheck="false"><button type="submit" aria-label="Найти"><svg><use href="#i-search"/></svg></button><button id="search-reset" type="button" aria-label="Сбросить поиск" title="Сбросить поиск" hidden><svg><use href="#i-close"/></svg></button><div id="search-suggestions" class="search-suggestions" role="listbox" aria-label="Подсказки поиска" hidden></div></form>
+  <div class="top-actions"><button id="global-settings" class="icon-button" type="button" title="Настройки" aria-label="Настройки"><svg><use href="#i-settings"/></svg></button><span class="connection"><i></i>Локальная сеть</span><button id="account-profile" class="profile" type="button" title="Выбрать профиль" aria-label="Выбрать профиль браузера">LT</button></div>
+</header>
+<aside id="sidebar" class="sidebar" aria-label="Навигация">
+  <button id="nav-home" class="nav-item active" type="button"><svg><use href="#i-home"/></svg><span>Главная</span></button>
+  <button id="nav-history" class="nav-item" type="button"><svg><use href="#i-history"/></svg><span>История</span></button>
+  <div class="nav-divider"></div>
+  <button id="nav-diagnostics" class="nav-item" type="button"><svg><use href="#i-code"/></svg><span>Диагностика</span></button>
+  <button id="nav-settings" class="nav-item" type="button"><svg><use href="#i-settings"/></svg><span>Настройки</span></button>
+  <div class="sidebar-note"><strong>Твой ПК — сервер</strong><p><span id="sidebar-browser">Браузерная сессия</span><br>Один активный поток.</p><span>LightTube · экспериментальная версия</span></div>
+</aside>
+<main>
+  <section id="player-section" hidden aria-label="Плеер">
+    <div id="video-frame">
+      <div class="mini-header"><span id="mini-title">LightTube</span><button id="mini-restore" type="button" class="icon-button" title="Развернуть" aria-label="Развернуть"><svg><use href="#i-expand"/></svg></button><button id="mini-close" type="button" class="icon-button" title="Остановить" aria-label="Остановить"><svg><use href="#i-close"/></svg></button></div>
+      <video id="player" playsinline preload="metadata" tabindex="0"></video>
+      <div id="loading-panel" class="loading-panel" role="status" aria-live="polite" hidden><span id="loading-spinner" class="loading-spinner" aria-hidden="true"></span><p id="loading-text">Подготавливаем видео…</p><button id="loading-action" type="button" class="pill-button" hidden>▶ Смотреть</button><button id="loading-cancel" type="button" class="pill-button">Отмена</button></div>
+      <div class="overlay">
+        <div id="inside-track" class="track" tabindex="0" role="slider" aria-label="Перемотка" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div id="inside-buffer" class="buffer-layer"></div><div id="inside-played" class="played"></div></div>
+        <div class="controls">
+          <button id="toggle" type="button" title="Пуск / пауза" aria-label="Пуск"><svg><use href="#i-play"/></svg></button>
+          <button id="stop" type="button" title="Остановить" aria-label="Остановить"><svg><use href="#i-stop"/></svg></button>
+          <button id="mute" type="button" title="Звук" aria-label="Выключить звук"><svg><use href="#i-volume"/></svg></button>
+          <span id="inside-time">0:00 / —</span>
+          <button id="player-settings" type="button" title="Качество и настройки" aria-label="Качество и настройки"><svg><use href="#i-settings"/></svg></button>
+          <button id="minimize" type="button" title="Свернуть в мини-плеер" aria-label="Свернуть в мини-плеер"><svg><use href="#i-mini"/></svg></button>
+          <button id="fullscreen" type="button" title="Полный экран" aria-label="Полный экран"><svg><use href="#i-expand"/></svg></button>
+        </div>
+      </div>
+    </div>
+    <div class="watch-heading"><div><h1 id="title">Видео</h1><span id="quality" class="quality-badge"></span><button id="channel" class="channel-link" type="button" disabled></button><p id="watch-meta" class="hint"></p></div><button id="close" class="icon-button" type="button" title="Закрыть видео" aria-label="Закрыть видео"><svg><use href="#i-close"/></svg></button></div>
+    <details class="description-panel"><summary>О видео</summary><p id="description"></p></details>
+    <details class="test-panel" open><summary>Тестовая полоса буфера</summary><p id="test-time">0:00 / —</p><div id="test-track" class="track" tabindex="0" role="slider" aria-label="Тестовая перемотка" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div id="test-buffer" class="buffer-layer"></div><div id="test-played" class="played"></div></div><p class="hint">Серый — данные в браузере. Перемотка доступна в подготовленные участки.</p></details>
+    <details id="related-panel" class="related-panel" open><summary>Далее · рекомендации к этому видео</summary><p id="related-status" class="feed-status"></p><div id="related" class="grid"></div><button id="more-related" class="load-more" type="button" hidden>Показать ещё</button></details>
+  </section>
+  <p id="status" class="status" role="status" aria-live="polite">Выбери видео или воспользуйся поиском.</p>
+  <details id="diagnostic-panel" class="diagnostic-panel"><summary>Открыть ссылку и диагностику</summary><div class="diagnostic-content">
+    <form id="form"><label for="url">Ссылка на YouTube</label><div class="input-row"><input id="url" placeholder="https://www.youtube.com/watch?v=..." maxlength="2048" required autocomplete="off"><button id="open" type="submit">Смотреть</button></div></form>
+    <label for="quality-select">Максимальное качество</label><select id="quality-select"><option value="0">Авто · до 1080p</option><option value="360">360p</option><option value="480">480p</option><option value="720" selected>720p</option><option value="1080">1080p</option></select><label for="playback-mode">Способ воспроизведения · BETA</label><select id="playback-mode"><option value="auto">Авто · готовый поток или HLS</option><option value="hls">Только HLS · сравнить запуск</option></select><label class="checkbox-label"><input id="prefetch-enabled" type="checkbox" checked> Подготавливать адреса выбранной карточки заранее</label><p class="hint">После задержки фокуса или мыши на карточке. Не скачивает видео; не чаще одного запроса за 10 секунд.</p><button id="force-hls" type="button" class="pill-button" hidden>Переключиться на HLS</button><pre id="details"></pre>
+  </div></details>
+  <section class="feed-section" aria-label="Видео">
+    <div class="feed-toolbar"><div class="chips" aria-label="Фильтры"><button class="chip active" data-filter="all" type="button">Все</button><button class="chip" data-filter="unwatched" type="button">Непросмотренные</button><button class="chip" data-filter="watched" type="button">Просмотренные</button></div><button id="refresh-feed" class="icon-button" type="button" title="Проверить рекомендации" aria-label="Проверить рекомендации"><svg><use href="#i-refresh"/></svg></button></div>
+    <p id="filter-note" class="hint" hidden>Непросмотренные — ролики без записи в истории LightTube и без доступной отметки просмотра YouTube. Полная история аккаунта не загружается.</p><div class="section-heading"><h2 id="feed-heading">Рекомендации</h2><span id="feed-source">Из сессии браузера на ПК</span></div>
+    <p id="feed-status" class="feed-status" role="status" aria-live="polite"></p>
+    <button id="apply-feed" class="new-feed" type="button" hidden>Есть новые рекомендации — показать</button>
+    <div id="feed" class="grid"></div><button id="load-more" class="load-more" type="button" hidden>Показать ещё</button><div id="empty-state" class="empty-state" role="status" hidden><div class="search-indicator"><span class="search-ring" aria-hidden="true"></span><svg aria-hidden="true"><use href="#i-search"/></svg></div><p id="empty-text">Воспользуйся поиском.</p></div>
+  </section>
+  <footer>История LightTube хранится только в памяти сервера и очищается при его перезапуске. Выбор профиля и настройки сохраняются. Общая история для устройств домашней сети. Временные файлы удаляются при штатной остановке. Cookies выбранного браузера не удаляются.</footer>
+</main>
+<div id="settings-modal" class="modal-backdrop" hidden><section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+  <div class="section-heading"><h2 id="settings-title">Настройки</h2><button id="settings-close" class="icon-button" type="button" title="Закрыть" aria-label="Закрыть настройки"><svg><use href="#i-close"/></svg></button></div>
+  <label for="settings-browser">Браузер на серверном ПК</label><select id="settings-browser"></select>
+  <label for="settings-profile">Профиль браузера</label><select id="settings-profile"><option value="auto">Автоматически</option></select><p id="profiles-status" class="hint"></p>
+  <label class="checkbox-label"><input id="ask-profile" type="checkbox" checked> Спрашивать профиль при открытии LightTube</label>
+  <p class="hint">Если выключить, выбранный профиль будет использоваться по умолчанию. Переключиться можно через значок LT. Выбор общий для устройств сервера; почта в списке не отображается.</p>
+  <p class="hint">Рекомендуем Firefox как источник сессии YouTube. Открывать LightTube можно в Chrome и других браузерах. Используется сессия выбранного браузера на ПК. Браузер должен быть установлен, а YouTube — открыт с нужным аккаунтом. Чтение cookies Chrome/Edge на Windows может быть недоступно.</p>
+  <label for="settings-quality">Максимальное качество</label><select id="settings-quality"><option value="0">Авто · до 1080p</option><option value="360">До 360p · меньше трафика</option><option value="480">До 480p</option><option value="720">До 720p</option><option value="1080">До 1080p</option></select>
+  <p class="hint">Выбирается лучший совместимый поток до лимита. Его фактическое разрешение может отличаться из-за обрезки или пропорций ролика; оно видно в диагностике. Сохранение только качества не прерывает текущий просмотр.</p>
+  <p id="settings-status" role="status"></p>
+  <div class="settings-actions"><button id="settings-save" type="button" class="pill-button">Готово</button><button id="settings-restart" type="button" class="pill-button" hidden>Применить к этому видео</button></div>
+  <p id="restart-note" class="hint" hidden>Применение к текущему видео запустит его заново с начала.</p>
+  <p class="hint">Выбранный браузер, профиль, качество и этот переключатель сохраняются на сервере. При смене профиля поток останавливается, а общая история LightTube очищается.</p>
+</section></div>
+<script src="/static/hls.min.js"></script><script src="/static/app.js"></script>
+</body></html>
