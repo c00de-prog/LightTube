@@ -43,3 +43,7 @@ config.json
 build/
 dist/
 *.egg-info/
+# Cookies и локальные настройки
+cookies*.txt
+*.cookies.txt
+settings.json

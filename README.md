@@ -36,7 +36,7 @@ Install dependencies and start:
 ```
 
 FFmpeg must be in PATH; Deno is needed for full yt-dlp YouTube support. Python 3.11+ is recommended.
-Open http://127.0.0.1:8000 on the PC. Other devices use http://SERVER_IP:8000. Your earlier IP was 192.168.1.5; check `ipconfig` if it changes. Reload with Ctrl+F5 after updating.
+Open http://127.0.0.1:8000 on the PC. Other devices use http://SERVER_IP:8000. check `ipconfig` if it changes. Reload with Ctrl+F5 after updating.
 
 ## What's new
 
