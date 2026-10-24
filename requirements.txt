@@ -3,3 +3,5 @@ uvicorn>=0.30,<1
 yt-dlp[default]
 beautifulsoup4>=4.12,<5
 httpx>=0.27,<1
+pystray>=0.19,<1
+Pillow>=10

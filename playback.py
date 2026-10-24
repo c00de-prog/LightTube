@@ -113,7 +113,7 @@ def quality_details(selected, limit):
 
 def available_video_qualities(info):
     choices = {}
-    for f in compatible_video_formats(info):
+    for f in compatible_video_formats(info, 2160):
         resolution, fps = video_resolution(f), f.get('fps') or 0
         key = (resolution, fps)
         choices[key] = f'{resolution:g}p' + (f' · {fps:g} fps' if fps > 30 else '')
@@ -122,7 +122,7 @@ def available_video_qualities(info):
 
 AUDIO_PATTERN = r"^(auto|original|[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8}){0,3})$"
 LANGUAGE_NAMES = {'ru': 'Русский', 'en': 'English', 'uz': 'Oʻzbekcha', 'tg': 'Тоҷикӣ',
-                  'de': 'Deutsch', 'tr': 'Türkçe', 'es': 'Español', 'fr': 'Français',
+                  'cs': 'Čeština · Чешский', 'hu': 'Magyar · Венгерский', 'id': 'Bahasa Indonesia · Индонезийский', 'it': 'Italiano · Итальянский', 'pl': 'Polski · Польский', 'ro': 'Română · Румынский', 'nl': 'Nederlands', 'uk': 'Українська', 'vi': 'Tiếng Việt', 'th': 'ไทย', 'zh': '中文', 'de': 'Deutsch', 'tr': 'Türkçe', 'es': 'Español', 'fr': 'Français',
                   'pt': 'Português', 'ar': 'العربية', 'ja': '日本語', 'ko': '한국어', 'hi': 'हिन्दी'}
 
 
@@ -162,7 +162,10 @@ def select_audio(info, preference='auto'):
         language = audio_language(f)
         if language and re.fullmatch(AUDIO_PATTERN, language):
             label = LANGUAGE_NAMES.get(language, LANGUAGE_NAMES.get(language.split('-')[0], language))
-            if '-' in language:
+            regions = {'en-us': 'США', 'en-gb': 'Великобритания', 'de-de': 'Германия', 'pt-br': 'Бразилия', 'es-es': 'Испания'}
+            if language in regions:
+                label += ' (' + regions[language] + ')'
+            elif '-' in language:
                 label += ' · ' + language
             tracks[language] = {'id': language, 'label': label}
     selected = info.get('requested_formats') or [info]

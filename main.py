@@ -1,3 +1,4 @@
+from typing import Annotated
 """LightTube beta: shared browser recommendations and local HLS playback."""
 import asyncio
 import hashlib
@@ -6,6 +7,7 @@ import logging
 import os
 import re
 import secrets
+import sys
 import shutil
 import subprocess
 import tempfile
@@ -26,13 +28,17 @@ from yt_dlp.cookies import load_cookies
 from session_cookies import MemoryYoutubeDL, YouTubeCookiePolicy, youtube_domain
 import httpx
 from yt_dlp.networking import Request as YouTubeRequest
-from youtube_feed import parse_cards, parse_page, cards_from_data, continuation, FeedParseError
+from youtube_feed import channel_profile, parse_cards, parse_page, cards_from_data, continuation, FeedParseError
 from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 BASE = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False):
+    external = Path(sys.executable).resolve().parent
+    if (external / "static" / "index.html").is_file():
+        BASE = external
 VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{11}")
 SEGMENT = re.compile(r"segment-\d{6,}\.ts")
 logger = logging.getLogger("uvicorn.error")
@@ -109,6 +115,7 @@ class YouTubeService:
         self.feed_warning = ""
         self.search_cache = {}
         self.search_attempt = 0.0
+        self.channel_search_attempt = 0.0
         self.image_lock = threading.Lock()
         self.image_sources = OrderedDict()
         self.metadata = {}
@@ -118,7 +125,7 @@ class YouTubeService:
             self.browser = prefs["browser"]
         self.profile = prefs.get("profile", "auto") if isinstance(prefs.get("profile", "auto"), str) else "auto"
         self.ask_profile = prefs.get("ask_profile", True) is not False
-        self.default_quality = prefs.get("quality", 720) if prefs.get("quality", 720) in {0, 360, 480, 720, 1080} else 720
+        self.default_quality = prefs.get("quality", 720) if isinstance(prefs.get("quality", 720), int) and 0 <= prefs.get("quality", 720) <= 2160 else 720
         self.default_audio = prefs.get("audio", "auto") if isinstance(prefs.get("audio"), str) and re.fullmatch(AUDIO_PATTERN, prefs["audio"]) else "auto"
         self.settings_generation = 0
         self.page_cursors = OrderedDict()
@@ -231,8 +238,10 @@ class YouTubeService:
                 data = response.read(8 * 1024 * 1024 + 1)
                 if len(data) > 8 * 1024 * 1024:
                     raise FeedParseError("Страница YouTube слишком большая для текущего лимита парсера.")
-        page = parse_page(data.decode("utf-8", errors="replace"), scope=scope, limit=60)
-        self.latest_cursor = self.register_cursor(page["continuation"], page["config"])
+        html = data.decode("utf-8", errors="replace")
+        self.latest_channel_profile = channel_profile(html) if path.startswith("/channel/") else {}
+        page = parse_page(html, scope=scope, limit=60)
+        self.latest_cursor = self.register_cursor(page["continuation"], page["config"], scope=scope)
         return self.local_images(page["items"])
 
     def recommendations(self, refresh=False):
@@ -266,47 +275,82 @@ class YouTubeService:
                         "checked_at": getattr(self, "feed_wall", None),
                         "warning": warning, "source": "youtube-home-html", "cursor": self.feed_cursor}
 
-    def channel_videos(self, identifier):
+    def channel_videos(self, identifier, tab="videos"):
         with self.network_lock:
-            cached = self.channel_cache.get(identifier)
+            cache_key = identifier if tab == "videos" else identifier + ":" + tab
+            cached = self.channel_cache.get(cache_key)
             if cached and cached[0] > time.monotonic():
                 return cached[1]
             try:
                 self.check_access()
-                items = self.fetch_cards(f"/channel/{identifier}/videos?hl=ru")
-                result = {"items": items, "cursor": self.latest_cursor, "warning": ""}
+                if tab == "playlists":
+                    options = self.options()
+                    options.update(extract_flat=True, playlistend=60, skip_download=True, noplaylist=False)
+                    with self.ydl(options) as ydl:
+                        listing = ydl.extract_info(f"https://www.youtube.com/channel/{identifier}/playlists", download=False)
+                    items = []
+                    for entry in list(listing.get("entries") or [])[:60]:
+                        pid = str(entry.get("id") or "")
+                        if not re.fullmatch(r"[A-Za-z0-9_-]{10,80}", pid):
+                            continue
+                        thumbs = entry.get("thumbnails") or []
+                        items.append({"id": pid, "kind": "playlist", "title": entry.get("title") or "Playlist",
+                                      "thumbnail": self.register_image(thumbs[-1].get("url", "")) if thumbs else "",
+                                      "channel": entry.get("channel") or listing.get("channel") or ""})
+                    self.latest_channel_profile = {"title": listing.get("channel") or listing.get("uploader") or "", "avatar": ""}
+                    self.latest_cursor = None
+                else:
+                    items = self.fetch_cards(f"/channel/{identifier}/{tab}?hl=ru")
+                profile = dict(getattr(self, "latest_channel_profile", {}))
+                profile["id"] = identifier
+                profile["avatar"] = self.register_image(profile.get("avatar", ""))
+                for item in items:
+                    item["channel_id"] = identifier
+                    item["channel"] = profile.get("title") or item.get("channel", "")
+                    item["avatar"] = item.get("avatar") or profile.get("avatar", "")
+                result = {"items": items, "cursor": self.latest_cursor, "warning": "", "channel": profile}
                 if len(self.channel_cache) >= 12:
                     self.channel_cache.pop(next(iter(self.channel_cache)))
-                self.channel_cache[identifier] = (time.monotonic() + 180, result)
+                self.channel_cache[cache_key] = (time.monotonic() + 180, result)
                 return result
             except Exception as error:
                 return {"items": [], "cursor": None, "warning": self.explain(error)}
 
-    def search(self, query):
+    def search(self, query, kind="all", date="any"):
         with self.network_lock:
             now = time.monotonic()
-            cached = self.search_cache.get(query)
+            key = query if kind == "all" and date == "any" else (query, kind, date)
+            cached = self.search_cache.get(key)
             if cached and cached[0] > now:
                 return {"items": cached[1], "warning": "", "cached": True, "cursor": cached[2]}
-            if self.search_attempt and now - self.search_attempt < 5:
+            attempt = self.search_attempt if kind == "all" else self.channel_search_attempt
+            if attempt and now - attempt < 5:
                 return {"items": [], "warning": "Подожди несколько секунд перед новым поиском.", "cached": False}
-            self.search_attempt = now
+            if kind == "all": self.search_attempt = now
+            else: self.channel_search_attempt = now
             try:
-                items = self.fetch_cards("/results?" + urlencode({"search_query": query, "hl": "ru"}), scope="search")
+                params = {"search_query": query, "hl": "ru"}
+                if kind == "channels": params["sp"] = "EgIQAg=="
+                elif date != "any":
+                    import base64
+                    # YouTube SearchFilter protobuf: outer filters(2), upload_date(1).
+                    code = {"hour": 1, "today": 2, "week": 3, "month": 4, "year": 5}[date]
+                    params["sp"] = base64.b64encode(bytes([0x12, 2, 0x08, code])).decode("ascii")
+                items = self.fetch_cards("/results?" + urlencode(params), scope="channels" if kind == "channels" else "search")
                 while len(self.search_cache) >= 12:
                     self.search_cache.pop(next(iter(self.search_cache)))
-                self.search_cache[query] = (time.monotonic() + 180, items, self.latest_cursor)
+                self.search_cache[key] = (time.monotonic() + 180, items, self.latest_cursor)
                 return {"items": items, "warning": "", "cached": False, "cursor": self.latest_cursor}
             except Exception as error:
                 warning = str(error) if isinstance(error, FeedParseError) else self.explain(error)
                 return {"items": [], "warning": warning, "cached": False}
 
-    def register_cursor(self, next_page, config):
+    def register_cursor(self, next_page, config, scope="home"):
         if not next_page or not isinstance(config.get("INNERTUBE_CONTEXT"), dict):
             return None
         key = secrets.token_urlsafe(18)
         self.page_cursors[key] = {"next": next_page, "config": config,
-                                  "expires": time.monotonic() + 900, "result": None}
+                                  "expires": time.monotonic() + 900, "result": None, "scope": scope}
         while len(self.page_cursors) > 80:
             self.page_cursors.popitem(last=False)
         return key
@@ -342,8 +386,8 @@ class YouTubeService:
                         if len(raw) > 8 * 1024 * 1024:
                             raise FeedParseError("Следующая страница слишком большая.")
                 data = json.loads(raw)
-                items = self.local_images(cards_from_data(data, 60, allow_empty=True))
-                cursor = self.register_cursor(continuation(data, next_page["endpoint"]), config)
+                items = self.local_images(cards_from_data(data, 60, allow_empty=True, include_channels=page.get("scope") in {"search", "channels"}, channels_only=page.get("scope") == "channels"))
+                cursor = self.register_cursor(continuation(data, next_page["endpoint"]), config, scope=page.get("scope", "home"))
                 result = {"items": items, "cursor": cursor, "warning": ""}
                 page["result"] = result
                 return result
@@ -566,7 +610,7 @@ def run_stream(service, job, identifier, quality):
                 if code is not None:
                     if code != 0 or seconds <= 0:
                         raise RuntimeError("FFmpeg остановился. Подробности в ffmpeg.log этой сессии.")
-                    update(job, stage="complete", message="Подготовка завершена. Это не проверка целостности аудио.")
+                    update(job, completed_media=True, stage="complete", message="Подготовка завершена. Это не проверка целостности аудио.")
                     return
                 job["stop"].wait(0.4)
     except Exception as error:
@@ -585,10 +629,55 @@ def run_stream(service, job, identifier, quality):
             update(job, stage="stopped", ready=False, message="Поток остановлен.")
 
 
+CACHE_LIMIT_BYTES = 3_000_000_000
+
+
+def prune_media_cache(state, limit=CACHE_LIMIT_BYTES):
+    entries = []
+    for token, job in list(state.jobs.items()):
+        try:
+            size = sum(path.stat().st_size for path in job["folder"].rglob("*") if path.is_file())
+        except OSError:
+            continue
+        entries.append((token, job, size))
+    total = sum(item[2] for item in entries)
+    # Insertion order is updated when a completed rendition is reused.
+    for token, job, size in entries:
+        if total <= limit:
+            break
+        task = job.get("task")
+        if not job["stop"].is_set() or (task and not task.done()):
+            continue
+        shutil.rmtree(job["folder"], ignore_errors=True)
+        if not job["folder"].exists():
+            state.jobs.pop(token, None)
+            total -= size
+    return total
+
+
+async def cache_maintenance(state):
+    while True:
+        await asyncio.sleep(10)
+        prune_media_cache(state)
+
+
+def cache_parent():
+    configured = os.environ.get("LIGHTTUBE_CACHE_DIR", "").strip()
+    if not configured:
+        return None
+    folder = Path(configured).expanduser().resolve()
+    folder.mkdir(parents=True, exist_ok=True)
+    # Check access before allocating HTTP clients.
+    with tempfile.TemporaryFile(dir=folder):
+        pass
+    return str(folder)
+
+
 @asynccontextmanager
 async def lifespan(app):
     if not shutil.which("ffmpeg"):
         raise RuntimeError("FFmpeg не найден в PATH.")
+    selected_cache_parent = cache_parent()
     app.state.youtube = YouTubeService()
     app.state.jobs = {}
     app.state.session_id = secrets.token_urlsafe(18)
@@ -618,12 +707,15 @@ async def lifespan(app):
         timeout=httpx.Timeout(10, connect=5), follow_redirects=False,
         headers={"User-Agent": "LightTube/0.3", "Accept": "image/webp,image/png,image/jpeg,image/gif"},
     )
-    with tempfile.TemporaryDirectory(prefix="lighttube-hls-") as root:
+    with tempfile.TemporaryDirectory(prefix="lighttube-hls-", dir=selected_cache_parent) as root:
         app.state.root = Path(root)
         logger.info("LightTube: папка сессий %s", root)
+        maintenance = asyncio.create_task(cache_maintenance(app.state))
         try:
             yield
         finally:
+            maintenance.cancel()
+            await asyncio.gather(maintenance, return_exceptions=True)
             for job in app.state.jobs.values():
                 job["stop"].set()
             if app.state.tasks:
@@ -637,7 +729,14 @@ async def lifespan(app):
 
 
 app = FastAPI(title="LightTube Recommendations BETA", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
+class InterfaceFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if path.endswith((".html", ".js", ".css")):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+app.mount("/static", InterfaceFiles(directory=BASE / "static"), name="static")
 
 
 @app.get("/")
@@ -652,11 +751,8 @@ async def feed(request: Request, refresh: bool = False):
 
 
 BROWSERS = [
-    {"id": "firefox", "name": "Firefox"}, {"id": "chrome", "name": "Chrome"},
-    {"id": "edge", "name": "Edge"}, {"id": "brave", "name": "Brave"},
-    {"id": "opera", "name": "Opera"}, {"id": "vivaldi", "name": "Vivaldi"},
-    {"id": "chromium", "name": "Chromium"}, {"id": "safari", "name": "Safari"},
-    {"id": "none", "name": "Без браузерной сессии"},
+    {"id": "firefox", "name": "Firefox · рекомендуем"},
+    {"id": "none", "name": "Без cookies · доступ может быть ограничен"},
 ]
 
 
@@ -672,7 +768,7 @@ def session_info(request: Request):
 
 @app.get("/api/profiles")
 async def profiles(request: Request, browser: str = "firefox"):
-    if browser not in {b["id"] for b in BROWSERS}:
+    if browser not in {"none", "firefox", "chrome", "edge", "brave", "opera", "vivaldi", "chromium", "safari"}:
         raise HTTPException(422, "Неизвестный браузер.")
     items = await asyncio.to_thread(browser_profiles, browser)
     return JSONResponse({"items": [{"id": p["id"], "label": p["label"]} for p in items]},
@@ -681,7 +777,7 @@ async def profiles(request: Request, browser: str = "firefox"):
 
 class SettingsBody(BaseModel):
     browser: Literal["none", "firefox", "chrome", "edge", "brave", "opera", "vivaldi", "chromium", "safari"]
-    quality: Literal[0, 360, 480, 720, 1080]
+    quality: Annotated[int, Field(ge=0, le=2160)]
     profile: str | None = Field(default=None, max_length=32)
     ask_profile: bool | None = None
     audio: str | None = Field(default=None, max_length=35, pattern=AUDIO_PATTERN)
@@ -872,19 +968,45 @@ async def suggest(request: Request, q: str = Query("", max_length=160)):
 
 
 @app.get("/api/channels/{identifier}")
-async def channel_videos(identifier: str, request: Request):
+async def channel_videos(identifier: str, request: Request, tab: Literal["videos", "featured", "streams", "playlists"] = "videos"):
     if not re.fullmatch(r"UC[A-Za-z0-9_-]{22}", identifier):
         raise HTTPException(422, "Неверный идентификатор канала.")
-    result = await asyncio.to_thread(request.app.state.youtube.channel_videos, identifier)
+    result = await asyncio.to_thread(request.app.state.youtube.channel_videos, identifier, tab)
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/playlists/{identifier}")
+async def playlist_items(identifier: str, request: Request):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{10,80}", identifier):
+        raise HTTPException(422, "Invalid playlist identifier.")
+    service = request.app.state.youtube
+    def fetch():
+        with service.network_lock:
+            service.check_access()
+            options = service.options()
+            options.update(extract_flat=True, playlistend=60, skip_download=True, noplaylist=False)
+            with service.ydl(options) as ydl:
+                info = ydl.extract_info("https://www.youtube.com/playlist?list=" + identifier, download=False)
+            items = []
+            for entry in list(info.get("entries") or [])[:60]:
+                if re.fullmatch(r"[A-Za-z0-9_-]{11}", str(entry.get("id") or "")):
+                    items.append({"id": entry["id"], "title": entry.get("title") or "Video",
+                                  "channel": entry.get("channel") or entry.get("uploader") or "",
+                                  "duration": entry.get("duration")})
+            return {"items": items, "title": info.get("title") or "Playlist"}
+    try:
+        result = await asyncio.to_thread(fetch)
+    except Exception as error:
+        raise HTTPException(502, service.explain(error)) from None
     return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/search")
-async def search(request: Request, q: str = ""):
+async def search(request: Request, q: str = "", type: Literal["all", "channels"] = "all", date: Literal["any", "hour", "today", "week", "month", "year"] = "any"):
     q = q.strip()
     if not q or len(q) > 160:
         raise HTTPException(400, "Введи запрос от 1 до 160 символов.")
-    result = await asyncio.to_thread(request.app.state.youtube.search, q)
+    result = await asyncio.to_thread(request.app.state.youtube.search, q, type, date)
     return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
@@ -899,7 +1021,7 @@ async def thumbnail(identifier: str, request: Request):
 
 class PrepareBody(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
-    quality: Literal[0, 360, 480, 720, 1080] | None = None
+    quality: Annotated[int, Field(ge=0, le=2160)] | None = None
     audio: str | None = Field(default=None, max_length=35, pattern=AUDIO_PATTERN)
     mode: Literal["auto", "hls"] = "auto"
     start_low: bool = False
@@ -907,7 +1029,7 @@ class PrepareBody(BaseModel):
 
 class PrefetchBody(BaseModel):
     video_id: str = Field(pattern=r"^[A-Za-z0-9_-]{11}$")
-    quality: Literal[0, 360, 480, 720, 1080] = 720
+    quality: Annotated[int, Field(ge=0, le=2160)] = 720
     settings_generation: int
 
 
@@ -987,7 +1109,7 @@ def create_job(state, identifier, quality, mode="auto", start_low=False, info=No
 
 
 class UpgradeBody(BaseModel):
-    quality: Literal[0, 360, 480, 720, 1080] = 720
+    quality: Annotated[int, Field(ge=0, le=2160)] = 720
     audio: str | None = Field(default=None, max_length=35, pattern=AUDIO_PATTERN)
 
 
@@ -1026,6 +1148,22 @@ async def change_quality(token: str, body: UpgradeBody, request: Request):
         return {"id": child}
 
 
+def reusable_hls(job, identifier, quality, audio, generation):
+    state = job["state"]
+    if (job["identifier"] != identifier or job["quality"] != quality or job.get("audio", "auto") != audio
+            or job.get("settings_generation") != generation or state.get("mode") != "hls"
+            or not (state.get("completed_media") or state.get("stage") == "complete")):
+        return False
+    try:
+        playlist = (job["folder"] / "index.m3u8").read_text(encoding="utf-8")
+        segments = [line.strip() for line in playlist.splitlines() if line.strip() and not line.startswith('#')]
+        return '#EXT-X-ENDLIST' in playlist and bool(segments) and all(
+            SEGMENT.fullmatch(name) and (job["folder"] / name).is_file() and (job["folder"] / name).stat().st_size > 0
+            for name in segments)
+    except (OSError, UnicodeError):
+        return False
+
+
 @app.post("/api/prepare")
 async def prepare(body: PrepareBody, request: Request):
     try:
@@ -1041,6 +1179,21 @@ async def prepare(body: PrepareBody, request: Request):
             job["stop"].set()
         if state.tasks:
             await asyncio.gather(*list(state.tasks), return_exceptions=True)
+        prune_media_cache(state)
+        quality = state.youtube.default_quality if body.quality is None else body.quality
+        audio = state.youtube.default_audio if body.audio is None else body.audio
+        for token, cached in reversed(list(state.jobs.items())):
+            if reusable_hls(cached, identifier, quality, audio, state.youtube.settings_generation):
+                state.jobs.pop(token)
+                state.jobs[token] = cached
+                cached["stop"].clear()
+                cached.pop("upgrade", None)
+                cached["promoted"] = True
+                cached["last_seen"] = time.monotonic()
+                update(cached, ready=True, stage="complete", completed_media=True, media_cache_hit=True,
+                       startup_low=False, message="Готовое видео из кэша сервера.")
+                state.youtube.playback_pending.clear()
+                return {"id": token, "cached": True}
         # Ограниченное число старых папок; завершённый процесс уже остановлен.
         while len(state.jobs) >= 6:
             old_key = next(iter(state.jobs))
@@ -1070,13 +1223,17 @@ def job_status(token: str, request: Request):
 
 
 @app.post("/api/jobs/{token}/stop")
-def stop_job(token: str, request: Request):
+async def stop_job(token: str, request: Request):
     job = request.app.state.jobs.get(token)
     if job:
         job["stop"].set()
         child = request.app.state.jobs.get(job.get("upgrade"))
         if child and not child.get("promoted"):
             child["stop"].set()
+        tasks = [item.get("task") for item in (job, child if child and not child.get("promoted") else None) if item and item.get("task")]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        prune_media_cache(request.app.state)
     return {"ok": True}
 
 
@@ -1090,5 +1247,16 @@ def hls_file(token: str, filename: str, request: Request):
         raise HTTPException(404)
     with job["lock"]:
         job["last_seen"] = time.monotonic()
-    return FileResponse(path, media_type="application/vnd.apple.mpegurl" if filename.endswith("m3u8") else "video/mp2t",
-                        headers={"Cache-Control": "no-store"})
+    if filename.endswith("m3u8"):
+        # FFmpeg replaces this file atomically; serve a byte snapshot, not a deferred open.
+        for attempt in range(5):
+            try:
+                content = path.read_bytes()
+                return Response(content, media_type="application/vnd.apple.mpegurl",
+                                headers={"Cache-Control": "no-store"})
+            except PermissionError:
+                time.sleep(0.02)
+            except FileNotFoundError:
+                break
+        return Response(status_code=503, headers={"Retry-After": "1", "Cache-Control": "no-store"})
+    return FileResponse(path, media_type="video/mp2t", headers={"Cache-Control": "no-store"})

@@ -1,66 +1,79 @@
-# LightTube — Source Quality Beta
+# LightTube — Watch & Cache Beta
 
-A local streaming client for TVs, laptops and phones. Your PC prepares the stream and serves a browser UI over your home network.
+A lightweight local viewer for TVs, laptops and phones. A PC reads YouTube metadata and prepares compatible media; clients open a small browser interface on the home network.
 
-## Update
+## Update and run
 
-Back up the working project. Replace these files together:
-
-```text
-LightTube/
-  main.py
-  playback.py
-  youtube_feed.py
-  profiles.py
-  session_cookies.py
-  requirements.txt
-  README.md
-  static/
-    index.html
-    style.css
-    app.js
-    hls.min.js       # keep your existing copy
-```
-
-Keep your `.venv` and `.gitignore`. If `hls.min.js` is missing:
-
-```powershell
-Invoke-WebRequest "https://cdn.jsdelivr.net/npm/hls.js@1.7.3/dist/hls.min.js" -OutFile ".\static\hls.min.js"
-```
-
-Install dependencies and start:
+Back up the working project and copy the contents of the archive's `LightTube` folder into the project. Keep your `.venv`, `.gitignore` and existing `static/hls.min.js`. The archive contains application source and this README; it does not include cookies, local preferences or a commit-message file.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-FFmpeg must be in PATH; Deno is needed for full yt-dlp YouTube support. Python 3.11+ is recommended.
-Open http://127.0.0.1:8000 on the PC. Other devices use http://SERVER_IP:8000. Use `ipconfig` to find the server PC's current IPv4 address. Reload with Ctrl+F5 after updating.
+FFmpeg must be in PATH. Deno is used by yt-dlp for JavaScript challenges. Python 3.11+ is recommended.
 
-## What's new
+On the PC open http://127.0.0.1:8000. Other devices use http://SERVER_IP:8000; find the current server IPv4 address with `ipconfig`. Reload after updating; the CSS and app script also have a new cache version.
 
-- More cards from the initial homepage response and a **Show more** button when YouTube provides continuation data.
-- A collapsible **Up next** section below the player, parsed from the selected video's actual YouTube watch-page response. It is not a copy of the home feed.
-- Channel name and a collapsible description under the video.
-- Mini-player: minimize while browsing, restore without restarting playback, or stop it.
-- SVG icon controls for play/pause, stop, sound, mini-player, fullscreen and settings. Buttons have labels and tooltips.
-- Separate dialogs: player gear for quality and audio language, LT for the server profile, and the top/sidebar gear for playback preferences.
-- Session-only history on the server: partial and completed views with playback position.
-- Real channel avatars where available, proxied through the local server together with thumbnails.
-- Both the in-player timeline and the separate diagnostic timeline remain available.
+If the local HLS library is missing:
 
-## Browser selection
+```powershell
+Invoke-WebRequest "https://cdn.jsdelivr.net/npm/hls.js@1.7.3/dist/hls.min.js" -OutFile ".\static\hls.min.js"
+```
 
-Open the **LT** profile button and select the browser installed on the **server PC**: Firefox, Chrome, Edge, Brave, Opera, Vivaldi, Chromium or Safari (where supported), or no browser session.
+## Watching and browsing
 
-Open YouTube in that browser, log in if needed, resolve any consent or verification screen, verify that videos and the homepage work, then close the browser before testing.
+- The player gear opens a compact menu inside the video frame, including fullscreen. Quality, audio-language and playback-speed submenus have working controls; unavailable unrelated YouTube features are not imitated.
+- Quality and audio choices are saved on the server and apply to subsequent videos until changed. Applying to the current video prepares another rendition and restores the playback position; a short pause is possible. A choice made during an existing switch is queued.
+- The top/sidebar gear opens general playback preferences. The LT button opens the server-browser/profile selector.
+- The description contains view/date metadata when available and a three-line preview. Use More/Collapse to expand it. Technical source details remain in settings/diagnostics.
+- The separate test buffer strip is removed. The timeline inside the video still shows playback and buffered ranges.
+- Rotating loading indicators and the page-start animation are removed. Preparation, buffering and errors use readable status text and cancel/retry controls.
+- Related tabs include All, Author and Unwatched. Author loads the selected channel's Videos page, with pagination where YouTube supplies it. It does not merely filter the home feed.
+- Search has All and Channels tabs. Channel results open their channel's videos rather than preparing a media stream. Channel names on video cards and under the player are also clickable when a channel ID is available.
+- The full watch view hides the previous home/search grid. Opening Home, Search, History or a channel keeps an attached video in the mini-player, allowing browsing without losing playback.
 
-Browser support does not mean cookie access is guaranteed. Chrome/Edge on Windows may lock or protect cookie databases; selecting Firefox can be a practical alternative. LightTube does not disable browser security.
+Keyboard controls: F fullscreen, K/Space play/pause, M mute, J/L seek ten seconds and I mini-player. With focus in the video area, arrows seek/change volume. Input fields and open settings menus do not trigger player shortcuts. Player menus support arrows, Enter and Escape.
 
-Changing browser or profile stops the active stream and clears the shared history and recommendation caches. Changing only quality does not stop the current stream.
+## Compression, storage and repeat playback
 
-Optional startup variables:
+Video is copied with FFmpeg `-c:v copy`; it is not re-encoded, sharpened or upscaled after loading. HLS preparation converts audio to AAC-LC 128 kbps, 48 kHz stereo. Replaying completed cached HLS does not repeat that conversion or change the stored video bytes.
+
+A fully prepared HLS rendition can be reopened from its existing server files without running yt-dlp/FFmpeg again. Reuse requires matching video ID, quality limit, audio preference and browser/profile context. Its playlist must have an end marker and all referenced segment files must still exist and contain data. This validates cache completeness, not the quality or integrity of every decoded packet.
+
+The cache is bounded to **six session entries**, including quality variants and temporary preview sessions. Recently reused entries move to the end of the retention order. Older entries can be evicted before shutdown. These files use the server disk, not an unlimited RAM video archive.
+
+Incomplete preparation is not presented as a complete cached video. If the stream was stopped early, a segment is missing, the rendition has been evicted or the browser/profile context changed, preparation starts again. Resuming a partially generated HLS file is not implemented.
+
+Ready MP4 proxy mode does not save a complete video to disk. Repeat playback in that mode can request media again from YouTube. Media-address metadata is cached separately in memory for up to three minutes, bounded by known URL expiry.
+
+Normal server shutdown deletes its temporary session folder, history and media cache. An abrupt crash may leave temporary files behind. Preferences and the harmless profile-confirmation cookie survive restart; YouTube/browser cookies are not deleted.
+
+## Source quality and audio
+
+The player reports the actual selected source dimensions and FPS where known. Detailed source bitrate and compatible choices are available in settings/diagnostics; the quality cap is not passed off as the actual source resolution.
+
+Compatible H.264 sources are ranked by resolution, then FPS up to 60, then known video bitrate. The shorter dimension is used for portrait video. A ready combined MP4 must not reduce known resolution, FPS, bitrate or the selected audio language simply to avoid HLS. Source-reported bitrate is not a measurement of the current Wi-Fi connection or a guarantee of perceived sharpness.
+
+Auto is currently capped at 1080p. Legacy-TV compatibility remains the priority; VP9/AV1 is not passed to unsupported clients. Missing detail in an already compressed source cannot be restored by stream copying.
+
+The optional low-quality startup preview uses a compatible H.264/AAC MP4 up to 360p in the selected audio language, if one exists. Target preparation starts immediately; preview playback is capped at about three seconds. If the target is not ready then, the preview pauses and status text waits for it. This caps time spent watching low quality, not total startup time. Disable the preview in general settings for direct selected-quality testing.
+
+Audio choices select existing YouTube tracks, not generated voice-over or translation. Auto, Original and available language preferences are supported. If a saved language is absent, a compatible available track is used while the preference remains saved for the next video. Not all formats identify their language or mark an original track.
+
+## Browser session and preferences
+
+Use LT to choose a browser installed on the **server PC**. Firefox, Chrome, Edge, Brave, Opera, Vivaldi, Chromium and Safari (where supported) are listed, along with no browser session. Install support does not guarantee permission to decrypt cookies; Chrome-family browsers on Windows can block it. Firefox is the practical alternative used in earlier tests.
+
+Open YouTube in the selected server browser, sign in if needed and resolve any consent/check page. Clients can use another browser and do not need Python, FFmpeg, Deno or a local YouTube login.
+
+Detected profiles use neutral labels without emails. Preferences are saved in the server's LightTube settings file, outside application source by default. Changing browser/profile stops the current stream and clears recommendation/history context.
+
+The optional `lighttube-profile` client cookie remembers profile confirmation for 30 days. It contains only browser name and opaque profile ID, not YouTube cookies, passwords, email or a profile path. Turn it off in LT to remove it. It is a UI preference, not authentication.
+
+Imported YouTube cookies are reused in server memory. LightTube does not export a cookies.txt file or send those cookies to frontend clients. Browser-reading internals may use temporary database copies, and the OS may page memory; this is not a guarantee that no authentication data ever touches disk. Restart the server to reread the browser session after signing in/out.
+
+Optional server overrides:
 
 ```powershell
 $env:LIGHTTUBE_COOKIE_BROWSER = "firefox"
@@ -68,153 +81,102 @@ $env:LIGHTTUBE_FIREFOX_PROFILE = "C:\path\to\firefox\profile"
 $env:LIGHTTUBE_DENO = "C:\path\to\deno.exe"
 ```
 
-The Firefox profile override applies only when Firefox is selected. Client devices do not need the selected browser, Python, Deno or FFmpeg.
+## Recommendations, history and network scope
 
-## Quality
+BeautifulSoup locates YouTube page scripts; JSON is parsed without executing page JavaScript. Home, watch-related, channel and search responses are parsed separately. Continuation data is followed where available. Markup changes, missing metadata, authentication or rate limiting can prevent results; the lists can differ from the open YouTube browser tab.
 
-Settings are maximum limits: Auto (up to 1080p), up to 360p, 480p, 720p or 1080p. The server selects compatible H.264 video and AAC audio.
+Search autocomplete uses Google's public suggestion endpoint without account cookies. Home refresh is limited to once a minute, normal search and channel-only search have separate five-second request limits, and pagination is rate-limited. Detected bot checks/429 errors trigger a five-minute application cooldown, not a guarantee that an upstream restriction expires then.
 
-A source may have a nonstandard height such as 640 or 840 pixels because of its aspect ratio or cropping. That is not a new quality tier. The player badge displays the actual source resolution and frame rate when known; its quality settings also show dimensions, source-reported bitrate, available H.264 choices, and any gap below the requested limit. Video is copied, not upscaled.
+History is shared server RAM, capped at 100 entries and cleared on restart or browser/profile change. Unwatched uses this history and explicit watched markers supplied on YouTube cards; it cannot infer the full account history. LightTube playback is not sent to YouTube watch history. Likes, subscriptions and YouTube-account management are not implemented.
 
-Saving quality applies it to the next video. **Apply to this video** prepares a second rendition while the current one keeps playing, then switches at the current playback position. A brief pause is possible; this is staged switching, not seamless adaptive HLS. If preparation fails or times out, the current rendition remains active.
+One viewing session is active on the server, with a second rendition possible during a quality/audio switch. Connected home-network clients share server settings and can interrupt each other's stream. This beta has no client authentication: use it on your home network without router port forwarding. Traffic to YouTube uses HTTPS; the default local server URL uses HTTP.
 
-FFmpeg copies the video and converts only audio to AAC-LC, 128 kbps, 48 kHz, stereo. Reconnection attempts are limited. Stream integrity is not guaranteed after network failures; inspect the session's `ffmpeg.log` if playback stalls.
+## Validation
 
-## History and lifetime
+67 automated Python checks passed using controlled HTML/API/media fixtures. Checks cover channel search parsing/filtering, completed-HLS replay without another worker, rejection of partial/missing/proxy caches, bounded retention, profile isolation, source quality, audio preferences, safe URLs and existing API behavior.
 
-There are no LightTube accounts. History is shared by devices connected to this server and exists only in server memory. Playback position is periodically recorded; minimizing keeps playback running, while closing or selecting another video records the previous position.
+Mock-browser interaction checks passed for in-player menus, quality/audio persistence with position restoration, playback speed, author/unwatched tabs, channel navigation, description expansion, removed indicators/debug strip, keyboard controls and earlier playback behavior. These do not verify actual decoding, live YouTube markup, visual rendering on an old TV or real-network playback reliability.
 
-History, cached page tokens and recommendations reset on server restart. Browser/profile preferences are saved separately and persist. The UI detects a lost connection or a new server session during its periodic local heartbeat and clears stale history from the screen. The old browser-local history key is removed by this version.
+On your setup, test the provided long video through the previous stopping point, switch quality/audio in fullscreen, open Author, search Channels, expand/collapse the description and reopen a completely prepared HLS video. Diagnostics should identify a completed media-cache hit on replay. Then test the actual TV and phone.
 
-Temporary media files are deleted at normal shutdown. An abrupt crash can leave temporary files behind. Browser cookies are not deleted.
 
-History is a record, not a permanent video archive. Selecting an old history card prepares it again from the beginning; saved-position resume is not implemented in this beta.
+## Disk budget
 
-## Recommendations and pagination
+The temporary media cache now has a 3 GB (3,000,000,000 byte) budget in addition to its six-session limit. Old stopped entries are removed first; reusing an entry moves it to the end of the retention order. Cleanup runs on playback preparation, after stopped workers release their files, and every ten seconds. Active playback and a pending quality rendition are protected, so total temporary disk use can exceed 3 GB while they are active. Closing or replacing an oversized stream allows cleanup. This bounds retained disk media, not RAM usage. No lossy recompression is introduced.
 
-BeautifulSoup4 locates page scripts, and Python decodes `ytInitialData` and `ytcfg` as JSON without executing JavaScript.
 
-The initial feed reads up to 60 available cards; the actual count depends on the response. Show more uses continuation data returned by YouTube, with headers generated by yt-dlp for the selected browser session. Only server-side opaque cursor IDs are exposed to the client.
+## Author display fix
 
-If YouTube does not supply continuation/context data, the Show more button is hidden. Markup changes, authentication, consent screens or missing data can prevent home or related-feed extraction. The results may differ from the already open YouTube tab. This is not an official YouTube API integration.
+A visible Open channel button is provided under the player and in the Author tab. Channel headers and author cards use the channel profile image when YouTube returns it. Missing author labels on channel video listings are filled with the channel name; a subscriber/view count is not used as the avatar initial. Missing images use a generic placeholder. Common audio-language codes such as cs, hu, id, it, pl and ro now have readable language names.
 
-Only the selected video's media URLs are extracted; cards do not preload every stream. Home refresh is limited to once a minute and cached for five minutes; search results are cached for three minutes; pagination is limited to one uncached page request every five seconds. Related lists are cached for five minutes. A cooldown is applied after detected HTTP 429 or bot-verification failures; it does not guarantee the restriction has expired afterward.
 
-Viewing is not reported to YouTube watch history. New personalized recommendations are not guaranteed after every LightTube view.
+## Mobile landscape and TV diagnosis
 
-## Player and network limitations
+Fullscreen now requests landscape after fullscreen succeeds when supported, unlocks on exit, and falls back to native video fullscreen on browsers that expose it. Orientation permission and OS auto-rotate still depend on the real device/browser. Compact touch landscape layouts hide the sidebar and fit the video to the viewport. Use the Compatibility link or `/static/compatibility.html` on the TV after a playback failure. It reports browser API/codec declarations and the last 20 local HLS error summaries from that tab; it does not prove actual decoding or send diagnostics to a remote service. No TV-specific playback fix is claimed yet.
 
-- One active stream per server. Opening another video replaces the previous one.
-- No client authentication: connected home-network devices can change settings and stop the stream. Do not expose the server with router port forwarding.
-- Streams start after initial HLS segments are ready, without waiting for a full download.
-- Seeking is limited to prepared seekable ranges. The gray timeline is data buffered in the browser.
-- Prepared server duration does not prove complete audio.
-- Up to six old session folders are retained during operation; a long active video may use considerable disk space.
-- Channel avatars are used only when present in metadata; otherwise initials remain. Image cache is limited to 8 MiB; Firefox/account cookies are not forwarded to image hosts.
-- Live streams and upcoming premieres are not supported. A real legacy TV still requires compatibility testing.
-- Never share or commit browser cookies. Account restrictions remain possible when using yt-dlp with an account.
 
-## Verification
+## Native HLS diagnostic test
 
-Automated tests use controlled HTML/API responses and mock player events. They cover parsing, continuation handling, session authentication headers, browser/quality settings, history reset, local image proxy behavior and UI interactions.
+Open `/?native_hls=1` to test native browser HLS playback instead of hls.js when the selected delivery mode is HLS. This is opt-in and requires the browser to report native HLS support. Ready MP4 playback remains unchanged. Media-element error codes are saved in the same local diagnostic summary. This test distinguishes playback paths and is not a confirmed TV fix.
 
-They do not prove that your real browser session, YouTube feeds or every media stream will work.
 
-On your PC test: home cards and Show more, Up next below a video, audio past 1:08, minimize/restore, partial-view history, a server restart clearing history, browser selection and both quality actions. Test the laptop and phone as clients again before committing.
+## Clean player beta
+The author quality badge and separate channel buttons are hidden. Click the author avatar or name to open the channel. Click the video surface to pause/resume.
+General settings now apply quality/audio preferences to the current video as well as future videos (a short preparation pause is possible). Only tracks provided by YouTube are available.
+Developer options hide diagnostics and the server sidebar note by default. Developer mode, next-video autoplay (off by default), and partial Russian/English UI translations are stored in this browser's localStorage and survive a server restart.
+Next-video autoplay selects the first unviewed related video already loaded for the current video. If there is no candidate, playback ends normally. Browser autoplay restrictions still apply.
+1440p and 2160p are accepted quality caps. This beta still requires H.264 video and AAC audio: many YouTube 2K/4K variants use other codecs and therefore will not be selected. Auto remains capped at 1080p. There is no upscaling or AV1/VP9 transcoding in this update.
+This archive updates the web client and Python server; it is not an Android APK and does not resolve the TV Chrome decoder issue.
+Chrome session access uses yt-dlp's browser reader; Windows cookie encryption may prevent reading. No Chrome exporter extension or cookie-file importer has been added here.
 
-## Search autocomplete
+The browser-session selector now offers Firefox and no cookies only. Other browser integrations remain legacy API options, not supported choices in the beta UI. Opening the LightTube website in Chrome is independent of reading Chrome cookies. Firefox is recommended, not guaranteed error-free.
 
-The search bar has a single rounded focus border and up to eight query suggestions after two characters (300 ms debounce). Use Up/Down and Enter, click, or tap; Escape closes the list. Typing a URL skips suggestions. This is query autocomplete, not a numeric T9 keyboard.
 
-`GET /api/suggest?q=...` uses Google's public, undocumented YouTube suggestion service without browser cookies. Queries are sent to Google; results are cached in server memory for ten minutes, failures for 30 seconds. If unavailable, normal search still works. No account-specific autocomplete is promised. Restart the server and hard-refresh after replacing the files; keep your existing `static/hls.min.js`.
+## Playback stability test beta
+Settings open as a full-page dialog. Nickname and optional autoplay are browser-local preferences. A greeting appears once per server session in this tab. Loading transitions respect reduced motion.
+An offline/retry screen works in an already loaded page. A first visit while the server is off still shows the browser connection error; no offline shell or APK is included.
+Playback position is saved per tab and restored only while server session and settings context match. Reload recovery prepares the video again and may require Play after seeking. History supports returning to incomplete videos during the server session.
+The HLS manifest endpoint reads a byte snapshot with bounded PermissionError retries, avoiding deferred FileResponse reads of a changing playlist on Windows. Persistent locks return retryable 503.
+Quality menu filters standard resolutions against actual extracted H.264 formats, now including formats up to 2160p. This is not a browser decoder capability guarantee. No new 4K codec/transcoder support is added.
+Buffer memory is bounded more conservatively. SourceBuffer append/reset failures no longer trigger repeated media recovery loops. Actual failing YouTube streams need device testing; this is not a verified universal bufferAppendError fix.
+Unavailable audio generates a visible warning. Existing language selection and source replacement remain in use; this build cannot create a missing Russian audio track.
+Channel banners/popular/playlists/For You are not implemented in this package. Live streams remain explicitly unsupported, and no live YouTube playback was tested.
 
-## Profiles and immediate player feedback
 
-Click the **LT** profile button to choose a server browser and one of its detected local profiles. Chrome/Edge/Brave/Chromium/Vivaldi standard profile folders and Firefox profiles.ini are discovered; Opera standard folders are also supported. Safari uses automatic selection. The list uses neutral folder labels, never account emails or Google account metadata. If chrome://version has the same profile path in two windows, those windows use the same on-disk profile; the picker lists folders, not individual Google accounts within a profile.
+## Profile and settings UI revision
+The account button shows a local nickname and opens its dedicated dialog. Browser-session selection is in Settings. Settings lock background scrolling. Next-video autoplay is a compact switch inside player controls; the duplicate setting and Unwatched tabs are hidden. The network badge is hidden.
+A separate i18n.js translates common controls, dialogs and settings into English/Russian; source video/channel titles and some backend diagnostic messages remain untranslated. This is not complete localization.
+The quality menu is built from extracted H.264 resolutions, including nonstandard dimensions. API quality caps accept integers from 0 through 2160; 0 remains Auto up to 1080p. This does not add unsupported codec playback.
+Validation: 71 backend tests, UI checks for nickname persistence, dialog scroll lock, English labels, autoplay placement, and native HLS opt-in. No real TV/browser playback test was performed here.
 
-**Ask when opening LightTube** is on initially. Turn it off and click **Done** to use the selected profile automatically on future page loads. Done commits the choice; history remains temporary. Any client can change the shared server profile. Switching clears the shared temporary history and caches and stops playback. This does not circumvent Chrome cookie encryption or database locks.
 
-Preferences are stored outside the project in `%LOCALAPPDATA%\LightTube\settings.json` on Windows (or `~/.config/LightTube/settings.json` elsewhere). No cookies are saved in this file. Override its location with `LIGHTTUBE_SETTINGS_FILE`; for a nonstandard browser profile path use `LIGHTTUBE_CHROME_PROFILE`, `LIGHTTUBE_FIREFOX_PROFILE` or the corresponding browser name, then choose the discovered profile or Automatic. Existing saved preferences take precedence over the browser startup default.
+## Intro and visual refresh
+The supplied intro has been integrated as static/intro.js, with English greeting and hints, optional browser-permitted Web Audio, click/keyboard skip and a reduced-motion static fallback. It runs on each document load and bfcache return without waiting for the server response. Recommendation loading proceeds independently. An offline first visit still requires a running server.
+Navigating away from watch clears the active-watch reload snapshot. Subsequent mini-player time updates cannot restore it. Returning to a video through history still supports its saved playback position.
+The visual refresh uses cool violet/cyan accents, clearer surfaces, rounded cards and unified settings/player controls. No remote fonts or third-party assets were added.
+Validation includes intro/feed concurrency and navigation versus mini-player snapshot behavior in jsdom. Real browser animation rendering, audio output and TV playback remain device checks.
 
-Opening a video immediately shows the player, a loading indicator and the server's current preparation message, with Cancel. Ready shows a Play button; failure shows Retry. This is a preparation indicator, not a download-to-device button or a fabricated percentage. History refreshes now redraw active filters; Unwatched excludes local session-history entries and YouTube watched markers when present in the returned card metadata; it does not download the full account watch history. Filter selection resets to All when navigating between Home, Search and History.
 
-## In-memory cookies
+## Up-next and channel tabs beta
+Next-video autoplay now opens an 8-second overlay with thumbnail, title, channel, Continue and Cancel. No prepare request for the next stream is sent until the timer expires or Continue is selected. Leaving the view or disabling autoplay cancels the timer.
+The switch shows a pause mark when disabled. A Filters button reveals the remaining All/Watched controls.
+Channel pages have Home, Videos, Live and Playlists tabs. Playlists load up to 60 flat entries through yt-dlp and open up to 60 videos. There is no playlist pagination, automatic playlist queue, or guarantee that all YouTube layouts return items. The Live tab lists videos only; actual live playback remains unsupported. No live account or playlist network test was run in this environment.
+Additional English UI messages were added. Unexpected raw upstream errors may remain in their original language.
+A static English welcome is present in HTML as a fallback when intro.js cannot load. Full animation still depends on browser APIs and motion preferences.
+Validation: 71 backend tests plus UI checks for countdown cancellation, filters, channel tabs, intro/feed concurrency, nickname dialog and navigation restore behavior. Real browser rendering and YouTube network access require device testing.
 
-LightTube reads the chosen browser session once when first needed and reuses a YouTube-only cookie jar in server memory. It does not export cookies.txt, save cookies in preferences, send them to frontend clients, or pass a Cookie header to FFmpeg's command line. Cookies for unrelated browser sites are discarded from the imported jar. Switching browser/profile clears the jar; normal server shutdown clears it as well. Restart LightTube to reread a browser session after logging in/out. Changing quality keeps the same jar.
 
-This limits application persistence; it is not a guarantee of physical RAM-only storage. Original cookies remain in the browser profile; yt-dlp may create a temporary database copy while importing; OS paging, hibernation and crash dumps can also capture process memory. Python cannot guarantee secure memory erasure. A separate browser profile used only for YouTube reduces the scope of browser data read during import. No cookie file or account data is included in this ZIP.
+## English startup and avatar correction
+English is selected once when upgrading to this locale revision, even if an earlier default saved Russian; users may explicitly select Russian again afterward. More upstream error and empty-state strings are translated. This does not fix an underlying YouTube account/network failure, and arbitrary upstream diagnostics are not fully localized.
+The account avatar shows the first and last non-space nickname characters (uppercase). A random palette color is generated once and saved in this browser.
+Settings include Replay intro. Intro exceptions are logged and show a simple English fallback instead of silently hiding the intro. Browsers without Web Animations use a CSS entrance; reduced-motion mode remains static. Full animation scheduling was tested with a mocked Web Animations API, not visually rendered on the user's browser.
+Validation: 71 backend tests and UI checks for English startup, nickname initials, persistent random color, full animation scheduling and intro/navigation behavior.
 
-## Browsing state, history and keyboard controls
+## Translation crash hotfix
+Fixed multiline text handling in the translation observer. Nonfatal HLS events log at debug level only with Developer mode; fatal errors remain visible. An inline favicon avoids a missing favicon request. Other 404s still need their request URL to diagnose. Multiline/observer regression check passed.
 
-The LightTube logo now returns Home without reloading the page. Profile confirmation, the last submitted search query, the active feed/channel view and filter are remembered in browser localStorage, tagged with the server session ID and browser/profile identity. Refreshing the page restores them while the same server session is running. Profile confirmation can also be remembered for 30 days in the `lighttube-profile` preference cookie. It stores only the browser name and opaque profile ID, never YouTube cookies, email, or a browser profile path. The cookie can be disabled in the LT dialog. It skips the chooser only when its identity matches the current server selection, including after a server restart. It is a UI preference, not authentication. The LT button always allows an explicit switch. The search X button clears the submitted query and returns Home. This local record contains UI state, not Google cookies or credentials; stale data is discarded when the browser next connects to a different server session. Merely closing a tab does not stop the PC server.
 
-Viewing history remains shared **server RAM**, capped at 100 videos, cleared by a server restart or a browser/profile switch. Progress is recorded after viewing begins, periodically during playback and on close/end. It records started videos as well as completed ones; clicking a history item starts it from the beginning in this beta. It is not a downloaded-video archive and is not sent to YouTube watch history. Likes, liking videos, and a separate account-login tab are deliberately not implemented.
-
-**Unwatched** removes any video recorded in LightTube history and any card explicitly marked watched by YouTube in the HTML response. **Watched** includes either source. If a video was watched only on YouTube and the returned card has no watched marker, LightTube cannot know that fact and will still include it under Unwatched. Visible date/view counts are the metadata returned by YouTube, not live counters; missing data is left absent.
-
-Channel names are clickable when a valid YouTube channel ID is available. LightTube loads that channel's Videos page with the existing server browser session, caches it for three minutes and supports Show more when continuation data is present. Channel-only video feeds do not include community posts. If YouTube omits a channel ID, that card's channel label remains non-clickable.
-
-The player attempts playback after the stream manifest is ready. Browser autoplay restrictions may require clicking the compact Play icon once. The loading magnifier animates while feed/search/channel data is being fetched; it stops on completion or error, including an empty result. No indefinite spinner is used to hide a failure.
-
-Keyboard shortcuts while a video is attached: **F** fullscreen, **K / Space** play/pause, **M** mute, **J / L** back/forward 10 seconds, **I** mini-player. With focus in the video area, Left/Right seek ten seconds and Up/Down adjust volume. Text inputs, selectors, editable fields and the settings dialog are excluded from player shortcuts. Playback seeking remains limited to prepared ranges. Card navigation with a TV remote still requires a real-device check.
-
-Firefox is the recommended browser-session source on Windows and worked in the user's tests. LightTube itself may be opened in Chrome. Browser/profile choices also include Chrome, Edge, Brave, Opera, Vivaldi, Chromium and Safari (macOS, automatic selection), plus no browser session; browser-cookie access is not guaranteed. Chrome DPAPI/app-bound decryption failures cannot be solved by RAM storage. Cookie-file import and a native application installer are not included in this version.
-
-## Remaining real-TV checks
-
-Use the same home network, start the PC server with `--host 0.0.0.0`, and open `http://SERVER_IP:8000` on the TV. Check that the homepage and thumbnails load, then play a short known video with audio through the end. Test remote focus, card activation, pause/play, fullscreen, return Home, channel browsing, search autocomplete and Unwatched after starting a video. Repeat after a page refresh and a server restart to verify UI-state lifetime. Test 360p first, then 720p; browser MSE/HLS support, H.264 profile support and TLS capabilities differ on old televisions. Laptop/phone success does not establish compatibility with a particular old TV. No real television, Firefox account or live authenticated YouTube connection was available in the author's test environment.
-
-## Fast Start Beta
-
-The diagnostic panel now offers **Auto (ready MP4 or HLS)** and **HLS only**. This choice applies to the next video; it is remembered with the other browser UI state for the current server session. Auto looks for an existing HTTPS MP4 containing H.264 video and AAC audio. It uses that format only if its height and known frame rate are not below the otherwise-selected H.264 video, and its known video bitrate is not lower when the baseline video bitrate is available. Unknown candidate bitrate/FPS is rejected when required for this comparison. These checks avoid deliberate downgrades; they cannot prove identical visual quality between encodes. Higher-resolution formats are never synthesized, and a progressive 720p/1080p format is not promised.
-
-When eligible, MP4 is relayed through **the PC**, not redirected to YouTube. The server streams bytes without launching FFmpeg or writing a media file; it supports GET/HEAD and a single byte Range for browser seeking. Media addresses are validated and retained privately in RAM, not sent in job-status JSON. Browser cookies are not forwarded to the media source or client. Connections are limited to four active media requests and are closed on completion/disconnect. HTTPS redirects from the upstream are not followed in this beta.
-
-If no suitable MP4 exists, playback uses the existing HLS path. A native MP4 error or lack of initial decoded data for 12 seconds requests HLS; **Switch to HLS** in Diagnostics does the same manually. This is a one-way fallback within the video session, not seamless quality adaptation: it starts from the beginning. An upstream 403/410 marks media addresses for a fresh extraction during fallback. Normal HLS errors still use the existing recovery/error handling. FFmpeg remains required for the fallback and is checked at server startup.
-
-**Prepare selected-card addresses in advance** is enabled initially and can be disabled in Diagnostics. Holding mouse hover or remote/keyboard focus on one video card for 650 ms submits one speculative extraction, no media download. There is no automatic prefetch of all recommendation cards. The frontend and server limit attempts to once per ten seconds, with at most one speculative task. Speculation is skipped while another foreground extraction/stream-preparation task or the shared network lock is busy, and never queues itself ahead of pending playback. A request already executing inside yt-dlp cannot be forcibly interrupted safely; choosing another video during that request may still have to wait. Speculative network operations use shorter five-second socket timeouts and no retries, not a five-second total deadline. Disable the option to compare or if additional YouTube requests cause restrictions.
-
-The same RAM metadata cache is used by prefetch and playback. It holds at most 24 entries, normally for three minutes, bounded by known selected-URL expiry with a 30-second margin. Browser/profile switching clears it. Cache reuse avoids repeated metadata extraction; it does not remove media-network latency, decoder setup or browser buffering. HTTP/3/QUIC, multiple adaptive quality variants, and a guaranteed subsecond startup are not implemented or promised.
-
-Diagnostics reports the delivery mode, cache hit, source format ID, video/audio codecs, FPS and available source video or total bitrate. Unknown bitrate is left absent. Extraction time measures obtaining addresses; MP4 preparation time means the URL was ready, not that bytes or frames arrived. **Click-to-player-start** is measured in the browser using its `playing` event, so it is an approximate playback-start indicator, not an instrumented display-frame timestamp. HLS startup time continues to measure first prepared segments. Video remains un-reencoded; the HLS path still converts audio as before.
-
-For comparison, use the same video, selected quality, device and network. First turn prefetch off and open in HLS-only mode; record delivery mode, extraction/startup times, click-to-player-start and source format/bitrate. Then compare Auto. To test a warm start, enable prefetch, rest hover/focus on a card, allow extraction to finish and open that same video; inspect **Addresses from cache**. Restart the server between cold trials (which also clears the RAM cookie jar), and repeat measurements instead of relying on one run. A missing comparable progressive format will correctly keep Auto on HLS. Compare image quality at the same timestamp and displayed size.
-
-This beta was checked with controlled metadata/HTTP responses and mocked player events. Real Google media delivery, authenticated YouTube access, cookies from the user's browser, old-TV decoding and actual startup speed still require testing on the user's devices. Existing history, channel browsing, thumbnails, session restoration and keyboard controls are retained.
-
-
-## Player beta: preparation, preferences and quality
-
-The player uses a familiar spinning ring during preparation, buffering and a pending source switch. There is no packet-route diagram or artificial percentage. The spinner stops on playback, cancellation or error; reduced-motion preferences disable rotation.
-
-The **LT** button opens browser/profile preferences. The **player gear** opens quality and audio-language controls. The **top/sidebar gear** opens playback preferences, including the low-quality startup switch. Choosing a profile is remembered locally for 30 days by default; uncheck the remember option to remove this preference cookie. YouTube authentication stays on the server, separate from this harmless UI preference. Different IP addresses or client browsers have separate preference storage.
-
-With **low-quality startup** enabled (default), the server extracts the selected quality once and checks the returned format list for a compatible, ready H.264/AAC MP4 up to 360p. If found, playback starts with that preview. As soon as the preview is ready, target preparation starts immediately from the same extracted metadata, without an extra 2.5-second delay or a second extraction. Low-quality playback is capped at approximately three seconds. If the target is still preparing at that point, the preview pauses and a loading indicator waits for it. A faster target switches sooner. This caps low-quality viewing time; it does not promise a three-second total startup. Without such a preview, playback begins directly at the requested quality. This does not guarantee faster extraction or instant playback.
-
-When the target stream is ready at the current playback position, LightTube switches sources, restores the position and preserves play/pause state. During preparation, both renditions may consume bandwidth; HLS can temporarily use two FFmpeg workers. A short pause during the switch is possible. Cancelling or selecting a different video stops its pending rendition. Unused stale source metadata is re-extracted rather than reused indefinitely.
-
-The **Up next** section is expanded when a video is opened and loads recommendations from that video's watch page. It includes loading feedback and a retry action for empty/error responses. YouTube may return no cards because of authentication, consent, markup changes or availability; LightTube does not substitute the home feed as related recommendations.
-
-Maintainer validation: 62 automated Python tests plus UI interaction checks with mocked media/API responses passed. They cover optional preview selection, trusted source URLs, reuse of extraction, promotion/cancellation, separate settings dialogs, cookie persistence and removal, automatic upgrade and position preservation at 68 seconds. Additional tests cover audio selection, missing-language fallback, persisted quality/audio defaults across server restarts, immediate target preparation, the three-second preview cap, and retries without a preview. Live YouTube, real decoding and old-TV playback must still be tested on your setup.
-
-
-## Remembered quality and audio language
-
-The player gear offers **Quality and audio**. Save a maximum quality and an audio-language preference once; subsequent videos use them automatically until you change them. Apply to the current video prepares a new rendition and restores the current position. Both preferences are stored in the server's `settings.json` alongside the browser choice, survive server restart, and are shared by clients using this one server. No additional per-video chooser is displayed.
-
-Audio choices include Auto, Original and languages returned in that video's format metadata. Before metadata is available, common language preferences can be selected. LightTube selects existing YouTube audio tracks; it does not generate a translation, synthesize voices or label an unknown track as a confirmed original. If a preferred language or a marked original track is absent, the currently available audio is used and a notice appears under the video. The saved preference is retained for the next video. The preview must match the selected track's language; otherwise it is skipped to avoid changing voices mid-startup.
-
-On automatic target-preparation failure, low-quality playback pauses and a retry starts directly at the selected quality instead of repeating the preview stage. Network and decoding failures still require a real playback check on your server and client device.
-
-
-## Source-quality selection
-
-Quality is a maximum source-resolution limit. Compatible H.264 candidates are ranked by resolution, then frame rate up to 60 fps, then known video bitrate. The bitrate is source metadata, not a measurement of the local connection or a guarantee of perceived sharpness. The shorter dimension is used for portrait video, so a 720 × 1280 video is eligible for a 720p limit. DRM, untrusted media URLs, unsupported codecs and known frame rates above 60 remain excluded.
-
-The player now displays the chosen source's actual resolution and its FPS, not merely the requested limit. The player gear also shows available compatible source choices, dimensions and known bitrate. If only a smaller H.264 source is available, that is stated explicitly. Increasing the quality cap never upscales the source. Switching to a higher cap can reuse the full cached format list while it is fresh.
-
-Video is still copied with FFmpeg `-c:v copy`; no video re-encoding, sharpening filter or image upscaling is added. A comparable ready MP4 must not reduce known resolution, FPS, bitrate or the selected audio language just to avoid HLS. The optional three-second low-quality startup preview remains separately controlled in playback settings. H.264 compatibility for legacy TVs remains the priority; this beta does not promise parity with a different source codec used by the official player, or restore detail already missing from the source.
-
-The loading spinner's markup and CSS animation are embedded in `static/index.html`. A page-start indicator is visible before external scripts initialize and dismisses after the first local server response or error. The player keeps its preparation/buffering spinner. No animation library or packet-route diagram is needed.
-
-Additional automated checks cover bitrate/FPS selection, invalid-source rejection, portrait-only extraction, actual resolution labels, fresh-format reuse on quality changes, and loader dismissal on server errors. Live image quality and decoding still require testing on the actual server/client setup. For a comparison, choose 1080p, apply it to the current video, wait for the main source, and inspect the actual displayed dimensions. Compare the same timestamp and display size.
+## Date/channel filters and actual browser verification
+Filters now include upload date for video search (any time/hour/today/week/month/year) and an author selector for already loaded cards. Date is disabled outside video search; channel-only search does not apply an upload-date filter. Date preference is retained with the search in the same server session. YouTube search filter encoding is unofficial and live result filtering was not verified against an account here.
+Instant audio-language switching is NOT implemented: the current muxed HLS contains one audio track, and changing language still prepares another rendition. Seamless switching requires a multi-audio delivery pipeline and device tests.
+Validation: 71 backend tests, existing UI regressions, plus actual headless Chromium rendering with local mocked API responses. The intro displayed with 32 active animations, completed and closed; the filter panel opened; no JavaScript page exceptions were reported. This verifies local animation/UI behavior, not account access, audio output or TV decoding.

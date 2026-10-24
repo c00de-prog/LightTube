@@ -47,3 +47,5 @@ dist/
 cookies*.txt
 *.cookies.txt
 settings.json
+*build-venv/
+dist/

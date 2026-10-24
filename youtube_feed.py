@@ -180,12 +180,28 @@ def make_card(identifier, title, channel, duration, views, avatar=""):
             "avatar": avatar}
 
 
+def channel_card(renderer):
+    identifier = renderer.get('channelId') or renderer.get('contentId') or ''
+    if not re.fullmatch(r'UC[A-Za-z0-9_-]{22}', identifier):
+        return None
+    metadata = renderer.get('metadata', {}).get('lockupMetadataViewModel', {})
+    title = text(renderer.get('title') or metadata.get('title'))
+    if not title:
+        return None
+    avatar = channel_avatar({'channelThumbnail': renderer.get('thumbnail') or renderer.get('contentImage'), 'metadata': renderer.get('metadata', {})})
+    return {'kind': 'channel', 'id': identifier, 'channel_id': identifier, 'title': title,
+            'channel': title, 'avatar': avatar, 'thumbnail': avatar,
+            'handle': text(renderer.get('subscriberCountText')) if text(renderer.get('subscriberCountText')).startswith('@') else '',
+            'subscribers': text(renderer.get('videoCountText')) if text(renderer.get('subscriberCountText')).startswith('@') else text(renderer.get('subscriberCountText')),
+            'description': text(renderer.get('descriptionSnippet'))[:600]}
+
+
 def parse_cards(html, limit=24):
     data = initial_data(html)
     return cards_from_data(data, limit)
 
 
-def cards_from_data(data, limit=60, allow_empty=False):
+def cards_from_data(data, limit=60, allow_empty=False, include_channels=False, channels_only=False):
     items, seen = [], set()
     # Stay inside visible contents, avoiding unrelated menus/player metadata.
     for node in walk(data.get("contents", data)):
@@ -196,6 +212,15 @@ def cards_from_data(data, limit=60, allow_empty=False):
                 break
         if not card and isinstance(node.get("lockupViewModel"), dict):
             card = lockup_card(node["lockupViewModel"])
+        if include_channels:
+            for key in ('channelRenderer', 'gridChannelRenderer', 'lockupViewModel'):
+                if isinstance(node.get(key), dict):
+                    found = channel_card(node[key])
+                    if found:
+                        card = found
+                        break
+        if channels_only and card and card.get('kind') != 'channel':
+            card = None
         if card and card["id"] not in seen:
             seen.add(card["id"])
             items.append(card)
@@ -266,7 +291,14 @@ def parse_page(html, scope="home", limit=60):
     data = initial_data(html)
     content = related_contents(data) if scope == "related" else data.get("contents", data)
     return {
-        "items": cards_from_data(content, limit),
-        "continuation": continuation(content, "next" if scope == "related" else "search" if scope == "search" else "browse"),
+        "items": cards_from_data(content, limit, allow_empty=scope == "channels", include_channels=scope in {"search", "channels"}, channels_only=scope == "channels"),
+        "continuation": continuation(content, "next" if scope == "related" else "search" if scope in {"search", "channels"} else "browse"),
         "config": page_config(html),
     }
+
+
+def channel_profile(html):
+    data = initial_data(html)
+    metadata = data.get('metadata', {}).get('channelMetadataRenderer', {})
+    avatar = channel_avatar({'channelThumbnail': metadata.get('avatar') or data.get('header')})
+    return {'title': metadata.get('title') or '', 'avatar': avatar}
