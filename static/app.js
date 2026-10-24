@@ -13,6 +13,8 @@
     var selectedProfile = "auto", askProfile = true, profileVersion = 0, settingsGeneration = null, loadingUrl = null;
     var channelItems = [], channelCursor = null, channelBusy = false, activeChannel = null, lastQuery = "", restoringUI = false;
     var deliveryMode = null, deliveryFallback = false, directTimer = null, prefetchTimer = null, prefetchAt = 0, prefetchKey = "", openedAt = 0, firstFrameSeconds = null;
+    var settingsView = "profile", relatedVideo = null, upgradeToken = null, upgradeTimer = null, upgrading = false, preview = null, previewTimer = null, resumeAt = null, resumePlaying = true;
+    var audioPreference = "auto", audioTracks = [], retryFullQuality = false, currentQualityInfo = "";
     var quality = 720, heartbeatBusy = false, settingsBusy = false, priorFocus = null;
     // Remove only the legacy LightTube key. New history lives on the server.
     try { localStorage.removeItem("lighttube-history"); } catch (error) {}
@@ -26,7 +28,99 @@
         var valid = previous && previous.server === serverId && previous.browser === browser && previous.profile === selectedProfile;
         try { localStorage.setItem("lighttube-ui", JSON.stringify({server: serverId, browser: browser, profile: selectedProfile,
             confirmed: !!confirmed || !!(valid && previous.confirmed), query: lastQuery, view: view, filter: filter,
-            channel: activeChannel, playbackMode: el("playback-mode").value, prefetch: el("prefetch-enabled").checked})); } catch (e) {}
+            channel: activeChannel, playbackMode: el("playback-mode").value, prefetch: el("prefetch-enabled").checked, startLow: el("start-low").checked})); } catch (e) {}
+    }
+    function rememberedProfile() {
+        var match = document.cookie.match(/(?:^|; )lighttube-profile=([^;]*)/);
+        try { return match ? JSON.parse(decodeURIComponent(match[1])) : null; } catch (e) { return null; }
+    }
+    function rememberProfile() {
+        var value = el("remember-profile").checked ? encodeURIComponent(JSON.stringify({browser: browser, profile: selectedProfile})) : "";
+        document.cookie = "lighttube-profile=" + value + "; Path=/; Max-Age=" + (value ? 2592000 : 0) + "; SameSite=Strict" + (location.protocol === "https:" ? "; Secure" : "");
+    }
+    function cancelUpgrade() {
+        clearTimeout(upgradeTimer); upgradeTimer = null;
+        if (upgradeToken) api("POST", "/api/jobs/" + upgradeToken + "/stop", null, function () {});
+        upgradeToken = null; upgrading = false; clearPreview();
+    }
+    function clearPreview() { clearTimeout(previewTimer); previewTimer = null; preview = null; }
+    function previewStopped() {
+        if (!preview || preview.since === null) return;
+        preview.remaining = Math.max(0, preview.remaining - (Date.now() - preview.since));
+        preview.since = null; clearTimeout(previewTimer); previewTimer = null;
+    }
+    function holdPreview() {
+        if (!preview || preview.token !== session || preview.held || !upgrading) return;
+        previewStopped(); preview.held = true;
+        player.pause(); loading("Загружаем выбранное качество…", "busy");
+        message("Первые секунды показаны. Дожидаемся основного потока…", false);
+    }
+    function previewPlaying() {
+        if (!preview || preview.token !== session || preview.held) return;
+        previewStopped(); preview.since = Date.now();
+        previewTimer = setTimeout(holdPreview, preview.remaining);
+    }
+    function paintAudioOptions() {
+        var select = el("settings-audio"), selected = audioPreference, seen = {};
+        select.textContent = "";
+        var common = [{id:"auto",label:"Авто · дорожка YouTube"},{id:"original",label:"Оригинальная дорожка"}];
+        var defaults = [{id:"ru",label:"Русский"},{id:"en",label:"English"},{id:"uz",label:"Oʻzbekcha"},{id:"tg",label:"Тоҷикӣ"},{id:"de",label:"Deutsch"},{id:"tr",label:"Türkçe"},{id:"es",label:"Español"},{id:"fr",label:"Français"},{id:"pt",label:"Português"},{id:"ar",label:"العربية"},{id:"ja",label:"日本語"},{id:"ko",label:"한국어"},{id:"hi",label:"हिन्दी"}];
+        common.concat(audioTracks.length ? audioTracks : defaults).concat([{id:selected,label:selected + " · сохранено"}]).forEach(function (track) {
+            if (seen[track.id]) return; seen[track.id] = true;
+            var option = document.createElement("option"); option.value = track.id; option.textContent = track.label; select.appendChild(option);
+        });
+        select.value = selected;
+    }
+    function changeQuality(limit, voice, automatic) {
+        if (!session || upgrading) { if (upgrading) message("Качество уже переключается. Дождись подготовки.", false); return; }
+        upgrading = true;
+        if (!automatic) clearPreview();
+        var original = session, generation = epoch, started = Date.now();
+        message("Готовим выбранное качество. Текущее видео продолжает играть…", false);
+        function fail(text) {
+            var wasPreview = !!preview; cancelUpgrade();
+            if (wasPreview) { player.pause(); retryFullQuality = true; playbackError = true; loading(text + " Повторить сразу в выбранном качестве?", "error"); message(text, true); }
+            else message(text + " Продолжаем в прежнем качестве.", true);
+        }
+        api("POST", "/api/jobs/" + original + "/quality", {quality: limit, audio: voice || audioPreference}, function (error, result) {
+            if (generation !== epoch || original !== session) { if (!error) api("POST", "/api/jobs/" + result.id + "/stop", null, function () {}); return; }
+            if (error) { fail(error); return; }
+            upgradeToken = result.id;
+            function check() {
+                if (generation !== epoch || original !== session || !upgradeToken) return;
+                var next = upgradeToken;
+                api("GET", "/api/jobs/" + next, null, function (err, data) {
+                    if (generation !== epoch || original !== session || next !== upgradeToken) return;
+                    if (err || data.stage === "error" || data.stage === "stopped") { fail(err || data.message || "Не удалось изменить качество."); return; }
+                    var enough = data.mode === "mp4" || data.stage === "complete" || data.buffered >= (player.currentTime || 0) + 1.5;
+                    if (data.ready && enough) {
+                        api("POST", "/api/jobs/" + next + "/promote", null, function (promotionError) {
+                            if (generation !== epoch || original !== session || next !== upgradeToken) return;
+                            if (promotionError) { fail(promotionError); return; }
+                            recordHistory(false, false);
+                            resumeAt = player.currentTime || 0; resumePlaying = preview && preview.held ? true : !player.paused;
+                            clearPreview();
+                            attached = false; player.pause(); clearTimeout(directTimer);
+                            if (hls) { hls.destroy(); hls = null; }
+                            player.removeAttribute("src"); player.load();
+                            session = next; upgradeToken = null; upgrading = false; deliveryFallback = false; polling = false;
+                            loading("Переключаем качество…", "busy"); attach(data); poll();
+                            api("POST", "/api/jobs/" + original + "/stop", null, function () {});
+                        });
+                    } else if (Date.now() - started > 90000) fail("Подготовка качества заняла слишком много времени.");
+                    else upgradeTimer = setTimeout(check, 250);
+                }, 10000);
+            }
+            check();
+        });
+    }
+    function restorePosition() {
+        if (resumeAt === null || !attached) return;
+        var position = resumeAt;
+        if (position > 0 && (!player.seekable.length || position > player.seekable.end(player.seekable.length - 1))) return;
+        try { player.currentTime = position; } catch (e) { return; }
+        resumeAt = null;
+        if (resumePlaying) play(); else { player.pause(); loading("Нажми ▶ для просмотра.", "ready"); }
     }
     function isSeen(item) { return !!history[item.id] || item.is_watched === true; }
     function paintFilter() {
@@ -139,9 +233,10 @@
         el("loading-cancel").textContent = mode === "busy" ? "Отмена" : "Закрыть";
     }
     function clearPlayer() {
+        cancelUpgrade(); resumeAt = null; relatedVideo = null; el("related-panel").classList.remove("is-loading");
         clearTimeout(directTimer); directTimer = null; deliveryMode = null; deliveryFallback = false;
         el("force-hls").hidden = true;
-        attached = false; playbackError = false; duration = 0; currentVideo = null;
+        attached = false; playbackError = false; duration = 0; currentVideo = null; currentQualityInfo = ""; audioTracks = [];
         el("loading-panel").hidden = true;
         minimized = false; section.classList.remove("is-mini");
         if (hls) { var old = hls; hls = null; old.destroy(); }
@@ -158,7 +253,7 @@
         if (old && notify !== false) api("POST", "/api/jobs/" + old + "/stop", null, function () {});
     }
     function play() {
-        if (!attached) return;
+        if (!attached || resumeAt !== null || (preview && preview.held)) return;
         el("loading-panel").hidden = true;
         var promise, playingEpoch = epoch;
         try { promise = player.play(); } catch (e) { loading("Нажми ▶ для просмотра.", "ready"); return; }
@@ -196,6 +291,9 @@
     }
     function attach(data) {
         deliveryMode = data.mode || "hls";
+        audioTracks = data.audio_tracks || [];
+        paintAudioOptions();
+        el("audio-notice").textContent = [data.audio_language ? "Озвучка: " + data.audio_language : "", data.audio_warning || ""].filter(Boolean).join(" · ");
         attached = true; section.hidden = false; section.classList.remove("is-mini");
         currentVideo = {id: data.video_id, title: data.title, duration: data.duration, channel: data.channel || "", channel_id: data.channel_id || ""};
         el("title").textContent = data.title || "Видео"; el("mini-title").textContent = data.title || "LightTube";
@@ -204,22 +302,26 @@
         el("channel").onclick = function () { openChannel(data.channel_id, data.channel); };
         el("watch-meta").textContent = [data.views, data.published].filter(Boolean).join(" · ");
         el("description").textContent = data.description || "Описание отсутствует.";
-        el("quality").textContent = data.quality || "";
+        el("quality").textContent = data.source_quality || data.quality || "";
+        currentQualityInfo = [data.source_details || "", data.quality_note || "", (data.available_qualities || []).length ? "Доступные H.264-потоки: " + data.available_qualities.join(", ") : ""].filter(Boolean).join(" · ");
+        el("video-quality-notice").textContent = [data.source_details, data.quality_note].filter(Boolean).join(" · ");
+        el("video-quality-info").textContent = currentQualityInfo;
         section.scrollIntoView(true);
+        if (data.startup_low && !upgrading) { preview = {token: session, remaining: 3000, since: null, held: false}; changeQuality(data.target_quality, data.audio_preference || audioPreference, true); }
         if (deliveryMode === "mp4") {
             el("force-hls").hidden = false;
             player.src = data.stream; player.load();
             directTimer = setTimeout(function () { if (deliveryMode === "mp4" && player.readyState < 2) fallbackToHls(); }, 12000);
-            play(); draw(); loadRelated(data.video_id); return;
+            play(); restorePosition(); draw(); if (relatedVideo !== data.video_id) loadRelated(data.video_id); return;
         }
         if (window.Hls && Hls.isSupported()) {
             var attempts = 0, generation = epoch;
-            var instance = new Hls({startPosition: 0, maxBufferLength: 30, maxMaxBufferLength: 60, backBufferLength: 30});
+            var instance = new Hls({startPosition: resumeAt === null ? 0 : resumeAt, maxBufferLength: 30, maxMaxBufferLength: 60, backBufferLength: 30});
             hls = instance;
             function active() { return hls === instance && epoch === generation; }
             instance.once(Hls.Events.MEDIA_ATTACHED, function () { if (active()) instance.loadSource(data.stream); });
             instance.on(Hls.Events.MANIFEST_PARSED, function () { if (active() && player.paused) { play(); message("Видео подготовлено.", false); } });
-            instance.on(Hls.Events.BUFFER_APPENDED, function () { if (active()) draw(); });
+            instance.on(Hls.Events.BUFFER_APPENDED, function () { if (active()) { restorePosition(); draw(); } });
             instance.on(Hls.Events.ERROR, function (event, error) {
                 if (!active()) return;
                 console.error("LightTube HLS:", error.type, error.details, "fatal=" + error.fatal, error.error ? error.error.message : "");
@@ -231,9 +333,9 @@
             });
             instance.attachMedia(player);
         } else if (player.canPlayType("application/vnd.apple.mpegurl")) {
-            player.src = data.stream; player.load(); play(); message("Видео подготовлено.", false);
+            player.src = data.stream; player.load(); play(); restorePosition(); message("Видео подготовлено.", false);
         } else { attached = false; loading("Нет поддержки HLS. Проверь static/hls.min.js.", "error"); message("Нет поддержки HLS. Проверь static/hls.min.js.", true); }
-        draw(); loadRelated(data.video_id);
+        draw(); if (relatedVideo !== data.video_id) loadRelated(data.video_id);
     }
     function poll() {
         if (!session || polling) return;
@@ -241,6 +343,7 @@
         api("GET", "/api/jobs/" + token + "?t=" + Date.now(), null, function (error, data) {
             if (token !== session || generation !== epoch) return;
             polling = false;
+            if (data && data.title && data.video_id && relatedVideo !== data.video_id) loadRelated(data.video_id);
             if (error) { loading(error, "error"); message(error, true); return; }
             if (deliveryFallback && data.mode === "mp4") return;
             if (data.duration > 0) duration = data.duration;
@@ -260,31 +363,34 @@
             if (data.mode !== "mp4") lines.push("BETA · Папка: " + data.folder, "Лог: " + data.log);
             el("details").textContent = lines.join("\n"); draw();
             if (data.stage === "error" || data.stage === "stopped") {
+                if (!relatedBusy) el("related-panel").classList.remove("is-loading");
                 loading(data.message || "Не удалось подготовить видео", "error"); message(data.message, true); clearInterval(timer); timer = null; return;
             }
             if (data.ready && !attached) attach(data);
             else if (!attached) { loading(data.message || "Подготавливаем первые фрагменты…", "busy"); message(data.message, false); }
         }, 10000);
     }
-    function openVideo(url) {
+    function openVideo(url, fullQuality) {
         var item = feedItems.concat(searchItems, relatedItems, historyItems, channelItems).filter(function (v) { return v.id === url; })[0];
         clearTimeout(prefetchTimer); openedAt = Date.now(); firstFrameSeconds = null;
-        stopSession(true); loadingUrl = url; endedFor = null; preparing = true;
+        stopSession(true); retryFullQuality = false; audioTracks = []; el("audio-notice").textContent = ""; loadingUrl = url; endedFor = null; preparing = true;
         var generation = epoch;
         section.hidden = false; section.classList.remove("is-mini");
         el("title").textContent = item ? item.title : "Открываем видео…";
         el("channel").textContent = item ? item.channel || "" : "";
-        el("quality").textContent = ""; el("description").textContent = ""; el("watch-meta").textContent = ""; el("channel").disabled = true;
-        el("related-status").textContent = "Рекомендации появятся после подготовки видео.";
+        el("quality").textContent = ""; el("video-quality-notice").textContent = ""; currentQualityInfo = ""; el("video-quality-info").textContent = ""; el("description").textContent = ""; el("watch-meta").textContent = ""; el("channel").disabled = true;
+        el("related-panel").open = true;
+        el("related-panel").classList.add("is-loading"); el("retry-related").hidden = true;
+        el("related-status").textContent = "Рекомендации к ролику появятся здесь. Сначала получаем адреса видео…";
         loading("Получаем адреса видео и звука…", "busy"); section.scrollIntoView(true);
         el("open").disabled = true; message("Получаем видео…", false); el("details").textContent = "";
-        api("POST", "/api/prepare", {url: url, quality: quality, mode: el("playback-mode").value}, function (error, data) {
+        api("POST", "/api/prepare", {url: url, quality: quality, mode: el("playback-mode").value, start_low: el("start-low").checked && !fullQuality, audio: audioPreference}, function (error, data) {
             if (generation !== epoch) {
                 if (!error && data.id) api("POST", "/api/jobs/" + data.id + "/stop", null, function () {});
                 return;
             }
             preparing = false; el("open").disabled = false;
-            if (error) { loading(error, "error"); message(error, true); return; }
+            if (error) { el("related-panel").classList.remove("is-loading"); loading(error, "error"); message(error, true); return; }
             session = data.id; lastHistorySave = Date.now(); timer = setInterval(poll, 1000); poll();
         });
     }
@@ -400,16 +506,20 @@
         });
     }
     function loadRelated(id) {
-        var generation = epoch;
+        var generation = epoch; relatedVideo = id;
+        el("related-panel").classList.add("is-loading"); el("retry-related").hidden = true;
         relatedBusy = true; relatedItems = []; relatedCursor = null;
         el("related-status").textContent = "Получаем рекомендации со страницы этого ролика…";
         api("GET", "/api/related/" + id, null, function (error, data) {
-            if (generation !== epoch) return;
+            if (generation !== epoch || relatedVideo !== id) return;
+            el("related-panel").classList.remove("is-loading");
             relatedBusy = false;
             relatedItems = error ? [] : data.items || []; relatedCursor = error ? null : data.cursor || null;
             renderCards(relatedItems, el("related"), false);
             el("related-status").textContent = error || data.warning || "Блок «Далее» со страницы YouTube. Он может отличаться от открытой вкладки браузера.";
             el("more-related").hidden = !relatedCursor;
+            el("retry-related").hidden = !error && relatedItems.length > 0;
+            if (!error && !relatedItems.length) el("related-status").textContent = data.warning || "YouTube не вернул рекомендации к этому ролику. Можно повторить загрузку.";
         });
     }
     function loadMore(isRelated) {
@@ -454,12 +564,20 @@
             el("profiles-status").textContent = error || (items.length ? "Найдено профилей: " + items.length + ". Почта скрыта. Выбор не гарантирует доступ к cookies Chrome." : "Профили не найдены. Доступен автоматический выбор; нестандартный путь можно задать на сервере.");
         }, 10000);
     }
-    function showSettings() {
+    function showSettings(kind) {
+        settingsView = typeof kind === "string" ? kind : "profile";
+        el("settings-modal").setAttribute("data-view", settingsView);
+        el("settings-title").textContent = settingsView === "profile" ? "Профиль YouTube" : settingsView === "quality" ? "Качество и озвучка" : "Настройки воспроизведения";
+        paintAudioOptions();
+        el("video-quality-info").textContent = currentQualityInfo || "Параметры исходного потока появятся после подготовки видео.";
         priorFocus = document.activeElement;
+        el("settings-save").textContent = settingsView === "quality" && currentVideo ? "Сохранить для следующих видео" : "Готово";
         el("settings-modal").hidden = false; el("settings-quality").value = String(quality);
         el("settings-browser").value = browser;
-        el("settings-restart").hidden = !currentVideo; el("restart-note").hidden = !currentVideo;
-        el("settings-status").textContent = ""; el("ask-profile").checked = askProfile; loadProfiles(); el("settings-browser").focus();
+        el("settings-restart").hidden = !currentVideo || settingsView === "profile"; el("restart-note").hidden = !currentVideo || settingsView === "profile";
+        el("settings-status").textContent = ""; el("ask-profile").checked = askProfile;
+        el("remember-profile").checked = true;
+        if (settingsView === "profile") { loadProfiles(); el("settings-browser").focus(); } else { el("settings-save").disabled = settingsBusy; el("settings-quality").focus(); }
     }
     function closeSettings() {
         el("settings-modal").hidden = true;
@@ -469,10 +587,10 @@
         if (settingsBusy) return;
         settingsBusy = true; el("settings-save").disabled = true; el("settings-restart").disabled = true;
         var video = currentVideo ? currentVideo.id : null;
-        api("POST", "/api/settings", {browser: el("settings-browser").value, profile: el("settings-profile").value || "auto", ask_profile: el("ask-profile").checked, quality: Number(el("settings-quality").value)}, function (error, data) {
+        api("POST", "/api/settings", {browser: settingsView === "profile" ? el("settings-browser").value : browser, profile: settingsView === "profile" ? el("settings-profile").value || "auto" : selectedProfile, ask_profile: settingsView === "profile" ? el("ask-profile").checked : askProfile, quality: Number(el("settings-quality").value), audio: el("settings-audio").value || audioPreference}, function (error, data) {
             settingsBusy = false; el("settings-save").disabled = false; el("settings-restart").disabled = false;
             if (error) { el("settings-status").textContent = error; return; }
-            browser = data.browser; quality = data.quality; selectedProfile = data.profile || "auto"; askProfile = data.ask_profile !== false; settingsGeneration = data.settings_generation; el("quality-select").value = String(quality);
+            browser = data.browser; quality = data.quality; audioPreference = data.audio || el("settings-audio").value || "auto"; selectedProfile = data.profile || "auto"; askProfile = data.ask_profile !== false; settingsGeneration = data.settings_generation; el("quality-select").value = String(quality);
             el("sidebar-browser").textContent = "Сессия: " + browserName();
             if (data.browser_changed) {
                 stopSession(false); feedBusy = false; searchBusy = false; moreBusy = false;
@@ -481,9 +599,10 @@
                 channelItems = []; channelCursor = null; activeChannel = null; lastQuery = ""; prefetchKey = ""; clearTimeout(prefetchTimer); el("search-query").value = "";
                 renderCurrent(); refreshFeed(false, false);
             }
+            if (settingsView === "profile") rememberProfile();
             rememberUI(true); el("settings-status").textContent = "Профиль и настройки сохранены."; closeSettings();
             if (!feedLoaded && !data.browser_changed) refreshFeed(false, false);
-            if (restart && video) { closeSettings(); openVideo(video); }
+            if (restart && video && !data.browser_changed) changeQuality(quality, audioPreference);
         });
     }
     function disconnected() {
@@ -497,7 +616,7 @@
     }
     function bootstrap(data) {
         var changed = serverId !== data.session_id || settingsGeneration !== data.settings_generation;
-        serverId = data.session_id; browser = data.browser; quality = data.quality; online = true;
+        serverId = data.session_id; browser = data.browser; quality = data.quality; audioPreference = data.audio || "auto"; paintAudioOptions(); online = true;
         selectedProfile = data.profile || "auto"; askProfile = data.ask_profile !== false; settingsGeneration = data.settings_generation;
         document.querySelector(".connection").classList.remove("offline");
         var select = el("settings-browser"); select.textContent = "";
@@ -511,11 +630,13 @@
             feedCursor = searchCursor = null; pendingFeed = null; feedLoaded = false; el("apply-feed").hidden = true;
             loadHistory(true);
             var saved = readUI(), valid = saved && saved.server === serverId && saved.browser === browser && saved.profile === selectedProfile;
-            var prompt = askProfile && !(valid && saved.confirmed);
+            var device = rememberedProfile();
+            var trusted = device && device.browser === browser && device.profile === selectedProfile;
+            var prompt = askProfile && !(valid && saved.confirmed) && !trusted;
             if (!valid) { try { localStorage.removeItem("lighttube-ui"); } catch (e) {} }
             restoringUI = true;
             if (valid) {
-                el("playback-mode").value = saved.playbackMode === "hls" ? "hls" : "auto"; el("prefetch-enabled").checked = saved.prefetch !== false;
+                el("playback-mode").value = saved.playbackMode === "hls" ? "hls" : "auto"; el("prefetch-enabled").checked = saved.prefetch !== false; el("start-low").checked = saved.startLow !== false;
                 lastQuery = typeof saved.query === "string" ? saved.query.slice(0, 160) : ""; el("search-query").value = lastQuery;
                 filter = ["all", "unwatched", "watched"].indexOf(saved.filter) >= 0 ? saved.filter : "all";
             }
@@ -532,7 +653,7 @@
         if (heartbeatBusy) return;
         heartbeatBusy = true;
         api("GET", "/api/session", null, function (error, data) {
-            heartbeatBusy = false;
+            heartbeatBusy = false; el("page-loading").hidden = true;
             if (error) { disconnected(); if (!serverId) message(error, true); return; }
             if (data.session_id !== serverId || !online || data.settings_generation !== settingsGeneration) bootstrap(data);
         }, 7000);
@@ -670,15 +791,23 @@
     el("nav-history").onclick = function () { setView("history"); };
     el("nav-diagnostics").onclick = function () { var panel = el("diagnostic-panel"); panel.open = !panel.open; if (panel.open) panel.scrollIntoView(true); };
     el("loading-cancel").onclick = function () { stopSession(true); message("Подготовка остановлена.", false); };
-    el("loading-action").onclick = function () { if (this.getAttribute("data-mode") === "error") openVideo(loadingUrl); else play(); };
-    el("account-profile").onclick = showSettings;
+    el("loading-action").onclick = function () { if (this.getAttribute("data-mode") === "error") openVideo(loadingUrl, retryFullQuality); else play(); };
+    el("account-profile").onclick = function () { showSettings("profile"); };
+    el("retry-related").onclick = function () { if (relatedVideo) loadRelated(relatedVideo); };
     el("settings-browser").onchange = loadProfiles;
-    el("global-settings").onclick = showSettings; el("player-settings").onclick = showSettings; el("nav-settings").onclick = showSettings;
+    el("global-settings").onclick = function () { showSettings("general"); }; el("player-settings").onclick = function () { showSettings("quality"); }; el("nav-settings").onclick = function () { showSettings("general"); };
     el("settings-close").onclick = closeSettings;
     el("settings-modal").onclick = function (event) { if (event.target === this) closeSettings(); };
     el("settings-save").onclick = function () { saveSettings(false); };
     el("settings-restart").onclick = function () { saveSettings(true); };
-    el("quality-select").onchange = function () { quality = Number(this.value); el("settings-quality").value = String(quality); };
+    el("quality-select").onchange = function () {
+        quality = Number(this.value); el("settings-quality").value = String(quality);
+        var context = settingsGeneration;
+        api("POST", "/api/settings", {browser: browser, profile: selectedProfile, ask_profile: askProfile, quality: quality, audio: audioPreference}, function (error) {
+            if (context !== settingsGeneration) return;
+            message(error || "Качество сохранено для следующих видео.", !!error);
+        });
+    };
     el("menu-toggle").onclick = function () { document.body.classList.toggle("sidebar-collapsed"); };
     Array.prototype.forEach.call(document.querySelectorAll("[data-filter]"), function (button) {
         button.onclick = function () {
@@ -687,10 +816,20 @@
             recordHistory(false, true); loadHistory(true); renderCurrent(); rememberUI(false);
         };
     });
-    player.addEventListener("playing", function () { if (attached) { if (firstFrameSeconds === null && openedAt) firstFrameSeconds = Math.round((Date.now() - openedAt) / 10) / 100; clearTimeout(directTimer); directTimer = null; el("loading-panel").hidden = true; playbackError = false; message("Воспроизведение через LightTube.", false); } });
-    player.addEventListener("waiting", function () { if (attached && !playbackError) message("Буферизация…", false); });
+    player.addEventListener("playing", function () {
+        if (!attached) return;
+        if (preview && preview.held) { player.pause(); return; }
+        previewPlaying();
+        if (firstFrameSeconds === null && openedAt) firstFrameSeconds = Math.round((Date.now() - openedAt) / 10) / 100;
+        clearTimeout(directTimer); directTimer = null; el("loading-panel").hidden = true; playbackError = false;
+        message("Воспроизведение через LightTube.", false);
+    });
+    player.addEventListener("pause", previewStopped);
+    ["loadedmetadata", "progress", "canplay"].forEach(function (name) { player.addEventListener(name, restorePosition); });
+    player.addEventListener("waiting", function () { previewStopped(); if (attached && !playbackError) { loading(preview && preview.held ? "Загружаем выбранное качество…" : "Буферизация…", "busy"); message("Буферизация…", false); } });
     player.addEventListener("error", function () { if (attached && player.error) { if (deliveryMode === "mp4" && !deliveryFallback) { fallbackToHls(); return; } playbackError = true; message("Ошибка плеера " + player.error.code + ": " + player.error.message, true); } });
     player.addEventListener("timeupdate", function () {
+        if (preview && !preview.held && player.currentTime >= 3) holdPreview();
         if (attached && (Date.now() - lastHistorySave > 15000 || (currentVideo && !history[currentVideo.id] && player.currentTime >= 1 && Date.now() - lastHistorySave > 1000))) { lastHistorySave = Date.now(); recordHistory(false, false); }
     });
     player.addEventListener("ended", function () {
@@ -717,7 +856,7 @@
         if (el("settings-modal").hidden) return;
         if (event.keyCode === 27) { closeSettings(); return; }
         if (event.keyCode === 9) {
-            var nodes = Array.prototype.slice.call(el("settings-modal").querySelectorAll("button, select, input")).filter(function (n) { return !n.disabled && !n.hidden; });
+            var nodes = Array.prototype.slice.call(el("settings-modal").querySelectorAll("button, select, input")).filter(function (n) { return !n.disabled && !n.hidden && window.getComputedStyle(n).display !== "none" && !((settingsView !== "profile") && el("profile-settings").contains(n)) && !((settingsView === "profile") && el("quality-settings").contains(n)) && !((settingsView !== "general") && el("general-settings").contains(n)); });
             if (!nodes.length) return;
             var first = nodes[0], last = nodes[nodes.length - 1];
             if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }

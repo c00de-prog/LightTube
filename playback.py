@@ -45,18 +45,192 @@ def video_bitrate(f):
     return None
 
 
+def quality_format(quality):
+    quality = quality or 1080
+    video = 'bv[ext=mp4][vcodec^=avc1][fps<=60]'
+    combined = 'b[ext=mp4][vcodec^=avc1][acodec^=mp4a][fps<=60]'
+    return (f'({video}[height<={quality}]/{video}[width<={quality}])+ba[ext=m4a][acodec^=mp4a]/'
+            f'({combined}[height<={quality}]/{combined}[width<={quality}])')
+
+
+def video_resolution(f):
+    """Use the short dimension for portrait as well as landscape video."""
+    width, height = f.get('width') or 0, f.get('height') or 0
+    return min(width, height) if width and height else height or width
+
+
+def compatible_video_formats(info, limit=1080):
+    pool = list(info.get('formats') or []) + list(info.get('requested_formats') or [info])
+    result = []
+    for f in pool:
+        if (f.get('ext') != 'mp4' or not str(f.get('vcodec', '')).startswith(('avc1', 'h264'))
+                or f.get('has_drm') or not 0 < video_resolution(f) <= (limit or 1080)
+                or (f.get('fps') or 0) > 60
+                or f.get('protocol') not in (None, 'https', 'http', 'm3u8', 'm3u8_native')):
+            continue
+        try:
+            validate_media_url(f.get('url'))
+        except ValueError:
+            continue
+        result.append(f)
+    return result
+
+
+def select_video(info, quality):
+    candidates = compatible_video_formats(info, quality)
+    if not candidates:
+        raise ValueError('Нет совместимого H.264-потока в выбранном качестве.')
+    chosen = max(candidates, key=lambda f: (video_resolution(f), f.get('fps') or 0,
+                  video_bitrate(f) or 0, f.get('acodec') in (None, 'none')))
+    previous = info.get('requested_formats') or [info]
+    audio = next((f for f in previous if f.get('acodec') not in (None, 'none')), None)
+    if audio and audio is not chosen:
+        selected = [{**chosen, 'acodec': 'none'}, audio]
+    else:
+        selected = [chosen]
+    return dict(info, requested_formats=selected)
+
+
+def quality_details(selected, limit):
+    video = next((f for f in selected if f.get('vcodec') not in (None, 'none')), {})
+    resolution, fps = video_resolution(video), video.get('fps') or 0
+    label = f'{resolution:g}p' if resolution else 'Разрешение неизвестно'
+    if fps > 30:
+        label += f' · {fps:g} fps'
+    details = []
+    if video.get('width') and video.get('height'):
+        details.append(f'{video["width"]} × {video["height"]}')
+    if fps:
+        details.append(f'{fps:g} fps')
+    bitrate = video_bitrate(video)
+    if bitrate:
+        details.append(f'{bitrate / 1000:.2f} Мбит/с · по данным источника')
+    note = ''
+    if limit and resolution and resolution < limit:
+        note = f'Лимит {limit}p; выбран доступный H.264-поток {resolution:g}p. Масштабирование до лимита не выполняется.'
+    return {'source_quality': label, 'source_details': ' · '.join(details), 'quality_note': note}
+
+
+def available_video_qualities(info):
+    choices = {}
+    for f in compatible_video_formats(info):
+        resolution, fps = video_resolution(f), f.get('fps') or 0
+        key = (resolution, fps)
+        choices[key] = f'{resolution:g}p' + (f' · {fps:g} fps' if fps > 30 else '')
+    return [choices[key] for key in sorted(choices)][-24:]
+
+
+AUDIO_PATTERN = r"^(auto|original|[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8}){0,3})$"
+LANGUAGE_NAMES = {'ru': 'Русский', 'en': 'English', 'uz': 'Oʻzbekcha', 'tg': 'Тоҷикӣ',
+                  'de': 'Deutsch', 'tr': 'Türkçe', 'es': 'Español', 'fr': 'Français',
+                  'pt': 'Português', 'ar': 'العربية', 'ja': '日本語', 'ko': '한국어', 'hi': 'हिन्दी'}
+
+
+def original_audio(f):
+    return '(original)' in str(f.get('format_note', '')).lower() or (f.get('language_preference') or 0) >= 10
+
+
+def audio_language(f):
+    return str(f.get('language') or '').lower()
+
+
+def same_audio(first, second):
+    # An unknown language must not silently replace an explicitly identified track.
+    return audio_language(first) == audio_language(second)
+
+
+def usable_audio(info):
+    result = []
+    for f in info.get('formats') or info.get('requested_formats') or [info]:
+        if f.get('acodec') in (None, 'none') or f.get('has_drm'):
+            continue
+        if f.get('protocol') not in (None, 'https', 'http', 'm3u8', 'm3u8_native'):
+            continue
+        try:
+            validate_media_url(f.get('url'))
+        except ValueError:
+            continue
+        result.append(f)
+    return result
+
+
+def select_audio(info, preference='auto'):
+    """Choose an existing audio track without another network extraction."""
+    available = usable_audio(info)
+    tracks = {}
+    for f in available:
+        language = audio_language(f)
+        if language and re.fullmatch(AUDIO_PATTERN, language):
+            label = LANGUAGE_NAMES.get(language, LANGUAGE_NAMES.get(language.split('-')[0], language))
+            if '-' in language:
+                label += ' · ' + language
+            tracks[language] = {'id': language, 'label': label}
+    selected = info.get('requested_formats') or [info]
+    audio = next((f for f in selected if f.get('acodec') not in (None, 'none')), {})
+    matches = []
+    warning = ''
+    if preference == 'original':
+        matches = [f for f in available if original_audio(f)]
+    elif preference != 'auto':
+        code = preference.lower()
+        matches = [f for f in available if audio_language(f) == code]
+        if not matches and '-' not in code:
+            matches = [f for f in available if audio_language(f).split('-')[0] == code and not audio_language(f).endswith('-desc')]
+    if matches:
+        # Avoid adding a duplicate video input when a separate audio rendition exists.
+        audio = max(matches, key=lambda f: (f.get('vcodec') in (None, 'none'),
+                    f.get('language_preference') or 0, f.get('abr') or f.get('tbr') or 0))
+        video = next((f for f in selected if f.get('vcodec') not in (None, 'none')), None)
+        if video and video is not audio:
+            selected = [{**video, 'acodec': 'none'}, audio]
+        elif video:
+            selected = [video]
+    elif preference != 'auto':
+        warning = 'Выбранная озвучка недоступна у этого ролика. Используется доступная дорожка; предпочтение сохранено.'
+    return dict(info, requested_formats=selected, _audio_preference=preference,
+                _audio_language=audio_language(audio), _audio_warning=warning,
+                _audio_tracks=sorted(tracks.values(), key=lambda t: t['label']))
+
+
+def startup_format(info, quality):
+    """Select an optional <=360p H.264 preview from already extracted metadata."""
+    selected = info.get('requested_formats') or [info]
+    target = max((video_resolution(f) for f in selected if f.get('vcodec') not in (None, 'none')), default=0)
+    if target <= 360 or (quality and quality <= 360):
+        return None
+    audio = next((f for f in selected if f.get('acodec') not in (None, 'none')), {})
+    candidates = []
+    for f in info.get('formats') or []:
+        if (0 < video_resolution(f) <= 360
+                and str(f.get('vcodec', '')).startswith(('avc1', 'h264'))
+                and str(f.get('acodec', '')).startswith(('mp4a', 'aac'))
+                and f.get('ext') == 'mp4' and not f.get('has_drm') and same_audio(audio, f)
+                and f.get('protocol') in (None, 'https', 'http')
+                and (f.get('fps') or 0) <= 60):
+            try:
+                validate_media_url(f.get('url'))
+            except ValueError:
+                continue
+            candidates.append(f)
+    if not candidates:
+        return None
+    chosen = max(candidates, key=lambda f: (video_resolution(f), video_bitrate(f) or 0))
+    return {**info, 'requested_formats': [chosen], 'formats': [chosen]}
+
+
 def progressive_format(info, quality):
     selected = info.get('requested_formats') or [info]
     video = next((f for f in selected if f.get('vcodec') not in (None, 'none')), {})
-    baseline_height = video.get('height') or 0
+    audio = next((f for f in selected if f.get('acodec') not in (None, 'none')), {})
+    baseline_height = video_resolution(video)
     baseline_fps = video.get('fps') or 0
     candidates = []
     for f in info.get('formats') or [info]:
         if (f.get('ext') != 'mp4' or not str(f.get('vcodec', '')).startswith(('avc1', 'h264'))
                 or not str(f.get('acodec', '')).startswith(('mp4a', 'aac'))
-                or f.get('has_drm') or f.get('protocol') not in (None, 'https', 'http')):
+                or not same_audio(audio, f) or f.get('has_drm') or f.get('protocol') not in (None, 'https', 'http')):
             continue
-        height, fps = f.get('height') or 0, f.get('fps') or 0
+        height, fps = video_resolution(f), f.get('fps') or 0
         if not height or height > (quality or 1080) or height < baseline_height or fps > 60:
             continue
         if baseline_fps and (not fps or fps < baseline_fps):
@@ -69,7 +243,7 @@ def progressive_format(info, quality):
         except ValueError:
             continue
         candidates.append(f)
-    return max(candidates, key=lambda f: (f.get('height') or 0, f.get('fps') or 0,
+    return max(candidates, key=lambda f: (video_resolution(f), f.get('fps') or 0,
                                          f.get('vbr') or f.get('tbr') or 0), default=None)
 
 

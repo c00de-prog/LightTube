@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qs, urlparse, urlencode
 
-from playback import progressive_format, format_diagnostics, proxy_media, safe_headers
+from playback import quality_format, select_video, quality_details, available_video_qualities, AUDIO_PATTERN, select_audio, startup_format, progressive_format, format_diagnostics, proxy_media, safe_headers
 
 from profiles import browser_profiles, profile_path, load_preferences, save_preferences
 
@@ -119,6 +119,7 @@ class YouTubeService:
         self.profile = prefs.get("profile", "auto") if isinstance(prefs.get("profile", "auto"), str) else "auto"
         self.ask_profile = prefs.get("ask_profile", True) is not False
         self.default_quality = prefs.get("quality", 720) if prefs.get("quality", 720) in {0, 360, 480, 720, 1080} else 720
+        self.default_audio = prefs.get("audio", "auto") if isinstance(prefs.get("audio"), str) and re.fullmatch(AUDIO_PATTERN, prefs["audio"]) else "auto"
         self.settings_generation = 0
         self.page_cursors = OrderedDict()
         self.latest_cursor = None
@@ -366,13 +367,17 @@ class YouTubeService:
                 warning = str(error) if isinstance(error, FeedParseError) else self.explain(error)
                 return {"items": [], "cursor": None, "warning": warning}
 
-    def configure(self, browser, quality, profile=None, ask_profile=None):
+    def configure(self, browser, quality, profile=None, ask_profile=None, audio=None):
         with self.network_lock:
             profile = profile if profile is not None else (self.profile if browser == self.browser else "auto")
             if browser != "none":
                 profile_path(browser, profile)
             ask = self.ask_profile if ask_profile is None else ask_profile
-            save_preferences(browser, profile, quality, ask)
+            audio = self.default_audio if audio is None else audio
+            if not re.fullmatch(AUDIO_PATTERN, audio):
+                raise ValueError("Неизвестный язык озвучки.")
+            save_preferences(browser, profile, quality, ask, audio)
+            self.default_audio = audio
             changed = browser != self.browser or profile != self.profile
             self.profile = profile
             self.ask_profile = ask
@@ -409,11 +414,8 @@ class YouTubeService:
             options = self.options()
             if speculative:
                 options.update(socket_timeout=5, retries=0, extractor_retries=0)
-            options["format"] = (
-                f"bv[ext=mp4][vcodec^=avc1][height<={quality}][fps<=60]"
-                "+ba[ext=m4a][acodec^=mp4a]/"
-                f"b[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<={quality}][fps<=60]"
-            )
+            options["format_sort"] = ["lang", "res", "fps", "vbr", "tbr"]
+            options["format"] = quality_format(quality)
             try:
                 with self.ydl(options) as ydl:
                     info = ydl.extract_info("https://www.youtube.com/watch?v=" + identifier, download=False)
@@ -482,14 +484,26 @@ def run_stream(service, job, identifier, quality):
     try:
         update(job, stage="extracting", message="Получаем адреса видео и звука…")
         if job.pop("refresh_urls", False):
+            job.pop("info_override", None)
             with service.network_lock:
                 service.metadata.pop((identifier, quality or 1080), None)
         try:
-            info = service.extract(identifier, quality)
+            info = job.get("info_override") or service.extract(identifier, quality)
         finally:
             service.playback_pending.clear()
         if job["stop"].is_set():
             return
+        job["target_info"] = info
+        job["target_info_at"] = time.monotonic()
+        info = select_audio(select_video(info, quality), job.get("audio", "auto"))
+        update(job, available_qualities=available_video_qualities(info))
+        preview = startup_format(info, quality) if job.get("start_low") else None
+        if preview:
+            info = preview
+            quality = 360
+        update(job, startup_low=bool(preview), target_quality=job.get("quality", quality),
+               audio_preference=info.get("_audio_preference", "auto"), audio_language=info.get("_audio_language", ""),
+               audio_warning=info.get("_audio_warning", ""), audio_tracks=info.get("_audio_tracks", []))
         upload_date = info.get("upload_date") or ""
         published = f"{upload_date[6:8]}.{upload_date[4:6]}.{upload_date[:4]}" if re.fullmatch(r"\d{8}", upload_date) else ""
         views = info.get("view_count")
@@ -504,11 +518,11 @@ def run_stream(service, job, identifier, quality):
         if progressive:
             with job["lock"]:
                 job["media"] = {"url": progressive["url"], "headers": safe_headers(info.get("http_headers"), progressive.get("http_headers"))}
-            update(job, **common, **format_diagnostics([progressive]), mode="mp4", stage="ready", ready=True,
+            update(job, **common, **format_diagnostics([progressive]), **quality_details([progressive], quality), mode="mp4", stage="ready", ready=True,
                    stream=job["media_stream"], startup_seconds=round(time.monotonic() - started, 2),
                    message="Готовый MP4 через ПК. Загружаем первые кадры…")
             return
-        update(job, **common, **format_diagnostics(selected), mode="hls",
+        update(job, **common, **format_diagnostics(selected), **quality_details(selected, quality), mode="hls",
                fallback_reason="Готового MP4 сопоставимого качества нет." if not job.get("force_hls") else "Выбран HLS или выполнено переключение.")
         command = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "warning"]
         for item in selected:
@@ -650,7 +664,7 @@ BROWSERS = [
 def session_info(request: Request):
     state = request.app.state
     return JSONResponse({"session_id": state.session_id, "browser": state.youtube.browser,
-                         "quality": state.youtube.default_quality, "browsers": BROWSERS,
+                         "quality": state.youtube.default_quality, "audio": state.youtube.default_audio, "browsers": BROWSERS,
                          "profile": state.youtube.profile, "ask_profile": state.youtube.ask_profile,
                          "settings_generation": state.youtube.settings_generation},
                         headers={"Cache-Control": "no-store"})
@@ -670,13 +684,14 @@ class SettingsBody(BaseModel):
     quality: Literal[0, 360, 480, 720, 1080]
     profile: str | None = Field(default=None, max_length=32)
     ask_profile: bool | None = None
+    audio: str | None = Field(default=None, max_length=35, pattern=AUDIO_PATTERN)
 
 
 @app.post("/api/settings")
 async def save_settings(body: SettingsBody, request: Request):
     state = request.app.state
     try:
-        changed = await asyncio.to_thread(state.youtube.configure, body.browser, body.quality, body.profile, body.ask_profile)
+        changed = await asyncio.to_thread(state.youtube.configure, body.browser, body.quality, body.profile, body.ask_profile, body.audio)
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
     except OSError as error:
@@ -687,7 +702,7 @@ async def save_settings(body: SettingsBody, request: Request):
         with state.history_lock:
             state.history.clear()
     return {"ok": True, "browser_changed": changed, "browser": state.youtube.browser,
-            "quality": state.youtube.default_quality, "session_id": state.session_id,
+            "quality": state.youtube.default_quality, "audio": state.youtube.default_audio, "session_id": state.session_id,
             "profile": state.youtube.profile, "ask_profile": state.youtube.ask_profile,
             "settings_generation": state.youtube.settings_generation}
 
@@ -884,8 +899,10 @@ async def thumbnail(identifier: str, request: Request):
 
 class PrepareBody(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
-    quality: Literal[0, 360, 480, 720, 1080] = 720
+    quality: Literal[0, 360, 480, 720, 1080] | None = None
+    audio: str | None = Field(default=None, max_length=35, pattern=AUDIO_PATTERN)
     mode: Literal["auto", "hls"] = "auto"
+    start_low: bool = False
 
 
 class PrefetchBody(BaseModel):
@@ -947,6 +964,68 @@ async def use_hls(token: str, request: Request):
     return {"ok": True}
 
 
+def create_job(state, identifier, quality, mode="auto", start_low=False, info=None, audio=None):
+    token = secrets.token_urlsafe(24)
+    folder = state.root / token
+    folder.mkdir()
+    job = {"identifier": identifier, "quality": quality, "force_hls": mode == "hls",
+           "media_stream": f"/media/{token}", "hls_stream": f"/hls/{token}/index.m3u8", "folder": folder, "stop": threading.Event(), "lock": threading.Lock(), "browser": state.youtube.browser, "settings_generation": state.youtube.settings_generation,
+           "last_seen": time.monotonic(), "state": {
+               "stage": "queued", "ready": False, "message": "Запускаем подготовку…",
+               "video_id": identifier, "title": "", "quality": "", "duration": 0,
+               "channel": "", "channel_id": "", "published": "", "views": "", "description": "", "buffered": 0, "folder": str(folder), "log": str(folder / "ffmpeg.log"),
+               "stream": f"/hls/{token}/index.m3u8"}}
+    job["audio"] = state.youtube.default_audio if audio is None else audio
+    job["start_low"] = start_low
+    job["info_override"] = info
+    state.jobs[token] = job
+    task = asyncio.create_task(asyncio.to_thread(run_stream, state.youtube, job, identifier, quality))
+    job["task"] = task
+    state.tasks.add(task)
+    task.add_done_callback(state.tasks.discard)
+    return token
+
+
+class UpgradeBody(BaseModel):
+    quality: Literal[0, 360, 480, 720, 1080] = 720
+    audio: str | None = Field(default=None, max_length=35, pattern=AUDIO_PATTERN)
+
+
+@app.post("/api/jobs/{token}/quality")
+async def change_quality(token: str, body: UpgradeBody, request: Request):
+    state = request.app.state
+    async with state.start_lock:
+        job = state.jobs.get(token)
+        if not job or job["stop"].is_set():
+            raise HTTPException(410, "Сессия завершена.")
+        if not job.get("promoted", True):
+            raise HTTPException(409, "Этот поток ещё не выбран для просмотра.")
+        if job.get("settings_generation") != state.youtube.settings_generation:
+            raise HTTPException(410, "Профиль изменён.")
+        audio = job.get("audio", state.youtube.default_audio) if body.audio is None else body.audio
+        previous = state.jobs.get(job.get("upgrade"))
+        if previous and not previous["stop"].is_set():
+            if previous["quality"] == body.quality and previous.get("audio", "auto") == audio:
+                return {"id": job["upgrade"]}
+            raise HTTPException(409, "Дождись завершения переключения качества.")
+        if sum(not item["stop"].is_set() for item in state.jobs.values()) >= 2:
+            raise HTTPException(409, "Уже готовится другое качество. Дождись переключения.")
+        # Prune stopped sessions only; current playback and its pending rendition survive.
+        for old_key, old in list(state.jobs.items()):
+            if len(state.jobs) < 6:
+                break
+            if old["stop"].is_set() and (not old.get("task") or old["task"].done()):
+                state.jobs.pop(old_key)
+                shutil.rmtree(old["folder"], ignore_errors=True)
+        state.youtube.playback_pending.set()
+        info = job.get("target_info") if time.monotonic() - job.get("target_info_at", 0) < 120 else None
+        child = create_job(state, job["identifier"], body.quality,
+                           "hls" if job.get("force_hls") else "auto", info=info, audio=audio)
+        state.jobs[child]["promoted"] = False
+        job["upgrade"] = child
+        return {"id": child}
+
+
 @app.post("/api/prepare")
 async def prepare(body: PrepareBody, request: Request):
     try:
@@ -967,22 +1046,16 @@ async def prepare(body: PrepareBody, request: Request):
             old_key = next(iter(state.jobs))
             old = state.jobs.pop(old_key)
             shutil.rmtree(old["folder"], ignore_errors=True)
-        token = secrets.token_urlsafe(24)
-        folder = state.root / token
-        folder.mkdir()
-        job = {"identifier": identifier, "quality": body.quality, "force_hls": body.mode == "hls",
-               "media_stream": f"/media/{token}", "hls_stream": f"/hls/{token}/index.m3u8", "folder": folder, "stop": threading.Event(), "lock": threading.Lock(), "browser": state.youtube.browser, "settings_generation": state.youtube.settings_generation,
-               "last_seen": time.monotonic(), "state": {
-                   "stage": "queued", "ready": False, "message": "Запускаем подготовку…",
-                   "video_id": identifier, "title": "", "quality": "", "duration": 0,
-                   "channel": "", "channel_id": "", "published": "", "views": "", "description": "", "buffered": 0, "folder": str(folder), "log": str(folder / "ffmpeg.log"),
-                   "stream": f"/hls/{token}/index.m3u8"}}
-        state.jobs[token] = job
-        task = asyncio.create_task(asyncio.to_thread(run_stream, state.youtube, job, identifier, body.quality))
-        job["task"] = task
-        state.tasks.add(task)
-        task.add_done_callback(state.tasks.discard)
-        return {"id": token}
+        return {"id": create_job(state, identifier, state.youtube.default_quality if body.quality is None else body.quality, body.mode, body.start_low, audio=body.audio)}
+
+
+@app.post("/api/jobs/{token}/promote")
+def promote_job(token: str, request: Request):
+    job = request.app.state.jobs.get(token)
+    if not job or job["stop"].is_set():
+        raise HTTPException(410, "Сессия завершена.")
+    job["promoted"] = True
+    return {"ok": True}
 
 
 @app.get("/api/jobs/{token}")
@@ -1001,6 +1074,9 @@ def stop_job(token: str, request: Request):
     job = request.app.state.jobs.get(token)
     if job:
         job["stop"].set()
+        child = request.app.state.jobs.get(job.get("upgrade"))
+        if child and not child.get("promoted"):
+            child["stop"].set()
     return {"ok": True}
 
 

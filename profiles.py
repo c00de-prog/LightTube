@@ -24,12 +24,12 @@ def load_preferences():
         return {}
 
 
-def save_preferences(browser, profile, quality, ask):
+def save_preferences(browser, profile, quality, ask, audio="auto"):
     target = config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".tmp")
     temporary.write_text(json.dumps({"browser": browser, "profile": profile, "quality": quality,
-                                     "ask_profile": ask}), encoding="utf-8")
+                                     "ask_profile": ask, "audio": audio}), encoding="utf-8")
     temporary.replace(target)
 
 

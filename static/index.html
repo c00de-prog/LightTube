@@ -1,7 +1,15 @@
 <!doctype html>
 <html lang="ru">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#0f0f0f"><title>LightTube</title><link rel="stylesheet" href="/static/style.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#0f0f0f"><title>LightTube</title><link rel="stylesheet" href="/static/style.css"><style id="loading-animation-style">
+[hidden]{display:none!important}
+.loading-spinner{display:block;width:48px;height:48px;box-sizing:border-box;border:3px solid #ffffff30;border-top-color:#fff;border-right-color:#fff;border-radius:50%;animation:lt-loading-spin .75s linear infinite}
+@keyframes lt-loading-spin{to{transform:rotate(360deg)}}
+.page-loading{position:fixed;inset:0;z-index:1000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:#0f0f0f;color:#ddd;font:14px Arial,sans-serif}
+@media(prefers-reduced-motion:reduce){.loading-spinner{animation:none}}
+</style></head>
 <body>
+<div id="page-loading" class="page-loading" role="status" aria-live="polite"><span class="loading-spinner" aria-hidden="true"></span><span>LightTube · подключаемся к серверу…</span></div>
+<noscript><style>.page-loading{display:none}</style><p>Для LightTube нужно включить JavaScript.</p></noscript>
 <svg class="svg-defs" aria-hidden="true"><defs>
 <symbol id="i-menu" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></symbol>
 <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
@@ -47,16 +55,16 @@
           <button id="stop" type="button" title="Остановить" aria-label="Остановить"><svg><use href="#i-stop"/></svg></button>
           <button id="mute" type="button" title="Звук" aria-label="Выключить звук"><svg><use href="#i-volume"/></svg></button>
           <span id="inside-time">0:00 / —</span>
-          <button id="player-settings" type="button" title="Качество и настройки" aria-label="Качество и настройки"><svg><use href="#i-settings"/></svg></button>
+          <button id="player-settings" type="button" title="Качество и озвучка" aria-label="Качество и озвучка"><svg><use href="#i-settings"/></svg></button>
           <button id="minimize" type="button" title="Свернуть в мини-плеер" aria-label="Свернуть в мини-плеер"><svg><use href="#i-mini"/></svg></button>
           <button id="fullscreen" type="button" title="Полный экран" aria-label="Полный экран"><svg><use href="#i-expand"/></svg></button>
         </div>
       </div>
     </div>
-    <div class="watch-heading"><div><h1 id="title">Видео</h1><span id="quality" class="quality-badge"></span><button id="channel" class="channel-link" type="button" disabled></button><p id="watch-meta" class="hint"></p></div><button id="close" class="icon-button" type="button" title="Закрыть видео" aria-label="Закрыть видео"><svg><use href="#i-close"/></svg></button></div>
+    <div class="watch-heading"><div><h1 id="title">Видео</h1><span id="quality" class="quality-badge"></span><button id="channel" class="channel-link" type="button" disabled></button><p id="watch-meta" class="hint"></p><p id="video-quality-notice" class="hint"></p><p id="audio-notice" class="hint" aria-live="polite"></p></div><button id="close" class="icon-button" type="button" title="Закрыть видео" aria-label="Закрыть видео"><svg><use href="#i-close"/></svg></button></div>
     <details class="description-panel"><summary>О видео</summary><p id="description"></p></details>
     <details class="test-panel" open><summary>Тестовая полоса буфера</summary><p id="test-time">0:00 / —</p><div id="test-track" class="track" tabindex="0" role="slider" aria-label="Тестовая перемотка" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div id="test-buffer" class="buffer-layer"></div><div id="test-played" class="played"></div></div><p class="hint">Серый — данные в браузере. Перемотка доступна в подготовленные участки.</p></details>
-    <details id="related-panel" class="related-panel" open><summary>Далее · рекомендации к этому видео</summary><p id="related-status" class="feed-status"></p><div id="related" class="grid"></div><button id="more-related" class="load-more" type="button" hidden>Показать ещё</button></details>
+    <details id="related-panel" class="related-panel" open><summary>Далее · рекомендации к этому видео</summary><p id="related-status" class="feed-status"></p><button id="retry-related" type="button" class="pill-button" hidden>Повторить загрузку рекомендаций</button><div id="related" class="grid"></div><button id="more-related" class="load-more" type="button" hidden>Показать ещё</button></details>
   </section>
   <p id="status" class="status" role="status" aria-live="polite">Выбери видео или воспользуйся поиском.</p>
   <details id="diagnostic-panel" class="diagnostic-panel"><summary>Открыть ссылку и диагностику</summary><div class="diagnostic-content">
@@ -74,17 +82,21 @@
 </main>
 <div id="settings-modal" class="modal-backdrop" hidden><section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
   <div class="section-heading"><h2 id="settings-title">Настройки</h2><button id="settings-close" class="icon-button" type="button" title="Закрыть" aria-label="Закрыть настройки"><svg><use href="#i-close"/></svg></button></div>
+  <div id="profile-settings">
   <label for="settings-browser">Браузер на серверном ПК</label><select id="settings-browser"></select>
   <label for="settings-profile">Профиль браузера</label><select id="settings-profile"><option value="auto">Автоматически</option></select><p id="profiles-status" class="hint"></p>
-  <label class="checkbox-label"><input id="ask-profile" type="checkbox" checked> Спрашивать профиль при открытии LightTube</label>
+  <label class="checkbox-label"><input id="ask-profile" type="checkbox" checked> Спрашивать профиль на незнакомом устройстве</label>
   <p class="hint">Если выключить, выбранный профиль будет использоваться по умолчанию. Переключиться можно через значок LT. Выбор общий для устройств сервера; почта в списке не отображается.</p>
   <p class="hint">Рекомендуем Firefox как источник сессии YouTube. Открывать LightTube можно в Chrome и других браузерах. Используется сессия выбранного браузера на ПК. Браузер должен быть установлен, а YouTube — открыт с нужным аккаунтом. Чтение cookies Chrome/Edge на Windows может быть недоступно.</p>
-  <label for="settings-quality">Максимальное качество</label><select id="settings-quality"><option value="0">Авто · до 1080p</option><option value="360">До 360p · меньше трафика</option><option value="480">До 480p</option><option value="720">До 720p</option><option value="1080">До 1080p</option></select>
-  <p class="hint">Выбирается лучший совместимый поток до лимита. Его фактическое разрешение может отличаться из-за обрезки или пропорций ролика; оно видно в диагностике. Сохранение только качества не прерывает текущий просмотр.</p>
+  <label class="checkbox-label"><input id="remember-profile" type="checkbox" checked> Запомнить подтверждение на этом устройстве на 30 дней</label><p class="hint">Сохраняется только браузер и номер профиля. Cookies аккаунта YouTube в этот браузер не передаются.</p></div>
+  <div id="quality-settings"><label for="settings-quality">Максимальное качество</label><select id="settings-quality"><option value="0">Авто · до 1080p</option><option value="360">До 360p · меньше трафика</option><option value="480">До 480p</option><option value="720">До 720p</option><option value="1080">До 1080p</option></select>
+  <p class="hint">Выбирается лучший совместимый поток до лимита. Его фактическое разрешение может отличаться из-за обрезки или пропорций ролика; оно видно в диагностике. При применении к видео новый поток готовится в фоне, затем просмотр продолжается с текущей позиции. Возможна короткая пауза.</p>
+  <label for="settings-audio">Озвучка / язык звуковой дорожки</label><select id="settings-audio"><option value="auto">Авто · дорожка YouTube</option><option value="original">Оригинальная дорожка</option><option value="ru">Русский</option><option value="en">English</option><option value="uz">Oʻzbekcha</option></select><p id="video-quality-info" class="hint"></p><p id="audio-options-note" class="hint">Предпочтение применяется ко всем следующим видео, пока ты его не изменишь. Доступны только дорожки, предоставленные YouTube; озвучка не генерируется.</p>
+  </div><div id="general-settings"><label class="checkbox-label"><input id="start-low" type="checkbox" checked> Быстрый старт с низкого качества</label><p class="hint">Если доступен готовый MP4 до 360p, покажем первые 3 секунды, одновременно готовя выбранное качество. Если основной поток ещё не готов, появится индикатор загрузки. Иначе сразу запустим выбранное качество. Переключение может ненадолго прервать воспроизведение.</p></div>
   <p id="settings-status" role="status"></p>
   <div class="settings-actions"><button id="settings-save" type="button" class="pill-button">Готово</button><button id="settings-restart" type="button" class="pill-button" hidden>Применить к этому видео</button></div>
-  <p id="restart-note" class="hint" hidden>Применение к текущему видео запустит его заново с начала.</p>
-  <p class="hint">Выбранный браузер, профиль, качество и этот переключатель сохраняются на сервере. При смене профиля поток останавливается, а общая история LightTube очищается.</p>
+  <p id="restart-note" class="hint" hidden>Текущее видео продолжится с той же позиции после подготовки нового качества.</p>
+  <p class="hint">Браузер, профиль, качество и язык озвучки сохраняются на сервере и используются без повторного выбора. При смене профиля поток останавливается, а общая история LightTube очищается.</p>
 </section></div>
 <script src="/static/hls.min.js"></script><script src="/static/app.js"></script>
 </body></html>

@@ -1,3 +1,0 @@
-feat: add focused-card prefetch and progressive MP4 playback with HLS fallback
-
-Relay compatible ready MP4 streams through the PC with byte-range support, reuse bounded in-memory metadata, limit speculative extraction to one focused card, retain HLS without deliberate quality downgrades, and expose source-format and startup diagnostics.
