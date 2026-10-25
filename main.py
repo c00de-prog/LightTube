@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qs, urlparse, urlencode
 
-from playback import quality_format, select_video, quality_details, available_video_qualities, AUDIO_PATTERN, select_audio, startup_format, progressive_format, format_diagnostics, proxy_media, safe_headers
+from playback import quality_format, select_video, quality_details, available_video_qualities, AUDIO_PATTERN, audio_bundle, audio_language, original_audio, select_audio, startup_format, progressive_format, format_diagnostics, proxy_media, safe_headers
 
 from profiles import browser_profiles, profile_path, load_preferences, save_preferences
 
@@ -40,7 +40,8 @@ if getattr(sys, "frozen", False):
     if (external / "static" / "index.html").is_file():
         BASE = external
 VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{11}")
-SEGMENT = re.compile(r"segment-\d{6,}\.ts")
+SEGMENT = re.compile(r"segment-(?:[0-9]{1,2}-)?\d{6,}\.ts")
+RENDITION = re.compile(r"track-[0-9]{1,2}\.m3u8")
 logger = logging.getLogger("uvicorn.error")
 
 
@@ -131,6 +132,10 @@ class YouTubeService:
         self.page_cursors = OrderedDict()
         self.latest_cursor = None
         self.feed_cursor = None
+        self.topics = []
+        self.topic_sources = OrderedDict()
+        self.discover_cache = {}
+        self.marked_videos = set()
         self.related_cache = {}
         self.channel_cache = {}
         self.page_attempt = 0.0
@@ -241,6 +246,15 @@ class YouTubeService:
         html = data.decode("utf-8", errors="replace")
         self.latest_channel_profile = channel_profile(html) if path.startswith("/channel/") else {}
         page = parse_page(html, scope=scope, limit=60)
+        if scope == "subscriptions" and page["config"].get("LOGGED_IN") is False:
+            raise FeedParseError("Subscriptions require a signed-in YouTube account in the selected browser.")
+        if scope == "home":
+            self.topics = []
+            for topic in page.get("topics", []):
+                token = secrets.token_urlsafe(18)
+                self.topic_sources[token] = (topic, page["config"])
+                self.topics.append({"id":token, "label":topic["label"]})
+            while len(self.topic_sources) > 72: self.topic_sources.popitem(last=False)
         self.latest_cursor = self.register_cursor(page["continuation"], page["config"], scope=scope)
         return self.local_images(page["items"])
 
@@ -249,14 +263,14 @@ class YouTubeService:
             now = time.monotonic()
             if self.feed is not None and not refresh and now - self.feed_at < 300:
                 return {"items": self.feed, "cached": True, "checked_at": self.feed_wall,
-                        "warning": self.feed_warning, "source": "youtube-home-html", "cursor": self.feed_cursor}
+                        "warning": self.feed_warning, "source": "youtube-home-html", "cursor": self.feed_cursor, "topics": self.topics}
             if self.feed_attempt and now - self.feed_attempt < 60:
                 remaining = max(1, int(60 - (now - self.feed_attempt)))
                 notice = f"Повторная проверка через {remaining} с."
                 return {"items": self.feed or [], "cached": self.feed is not None,
                         "checked_at": getattr(self, "feed_wall", None),
                         "warning": (self.feed_warning + " " + notice).strip(),
-                        "source": "youtube-home-html", "cursor": self.feed_cursor}
+                        "source": "youtube-home-html", "cursor": self.feed_cursor, "topics": self.topics}
             self.feed_attempt = now
             try:
                 items = self.fetch_cards("/?hl=ru")
@@ -266,14 +280,67 @@ class YouTubeService:
                 self.feed_wall = int(time.time())
                 self.feed_warning = ""
                 return {"items": items, "cached": False, "checked_at": self.feed_wall,
-                        "warning": "", "source": "youtube-home-html", "cursor": self.feed_cursor}
+                        "warning": "", "source": "youtube-home-html", "cursor": self.feed_cursor, "topics": self.topics}
             except Exception as error:
                 warning = str(error) if isinstance(error, FeedParseError) else self.explain(error)
                 self.feed_warning = warning
                 logger.warning("Recommendations unavailable: %s", warning)
                 return {"items": self.feed or [], "cached": self.feed is not None,
                         "checked_at": getattr(self, "feed_wall", None),
-                        "warning": warning, "source": "youtube-home-html", "cursor": self.feed_cursor}
+                        "warning": warning, "source": "youtube-home-html", "cursor": self.feed_cursor, "topics": self.topics}
+
+    def mark_completed(self, identifier, generation):
+        with self.network_lock:
+            if generation != self.settings_generation or self.browser == "none" or identifier in self.marked_videos: return
+            try:
+                self.check_access()
+                options = self.options()
+                options.update(mark_watched=True, skip_download=True, socket_timeout=8, retries=0, extractor_retries=0)
+                with self.ydl(options) as ydl:
+                    ydl.extract_info("https://www.youtube.com/watch?v="+identifier, download=False)
+                self.marked_videos.add(identifier)
+                # Preserve rate limiting; refresh cached home only after its normal request interval.
+                self.feed_at = 0
+                logger.info("YouTube watched-history request sent for %s; recommendation changes are not guaranteed", identifier)
+            except Exception as error:
+                logger.warning("YouTube history sync unavailable: %s", self.explain(error))
+
+    def discover(self, category):
+        with self.network_lock:
+            cached = self.discover_cache.get(category)
+            if cached and cached[0] > time.monotonic(): return cached[1]
+            if category == "subscriptions" and self.browser == "none":
+                return {"items":[], "cursor":None, "warning":"Unfortunately we could not load your subscriptions. Check that you are signed in to YouTube in the selected browser on the server PC."}
+            try:
+                if category == "subscriptions":
+                    items = self.fetch_cards("/feed/subscriptions?hl=ru", scope="subscriptions")
+                elif category == "music":
+                    items = self.fetch_cards("/channel/UC-9-kyTW8ZkZNDHQJ6FgpwQ?hl=ru", scope="music")
+                else:
+                    topic, config = self.topic_sources[category]
+                    self.check_access()
+                    from yt_dlp.extractor.youtube import YoutubeTabIE
+                    with self.ydl() as ydl:
+                        headers = YoutubeTabIE(ydl).generate_api_headers(ytcfg=config)
+                        headers.update({"Content-Type":"application/json", "Origin":"https://www.youtube.com"})
+                        payload = {"context":config["INNERTUBE_CONTEXT"], "browseId":topic["browseId"], "params":topic["params"]}
+                        with ydl.urlopen(YouTubeRequest("https://www.youtube.com/youtubei/v1/browse?prettyPrint=false", data=json.dumps(payload).encode(), headers=headers, method="POST")) as response:
+                            raw = response.read(8*1024*1024+1)
+                        if len(raw)>8*1024*1024: raise ValueError("Page too large")
+                    data = json.loads(raw)
+                    items = self.local_images(cards_from_data(data, 60, allow_empty=True))
+                    self.latest_cursor = self.register_cursor(continuation(data), config)
+                warning = ""
+                if not items and category == "subscriptions":
+                    warning = "No subscription videos were returned. Check your YouTube sign-in in the selected browser; your subscriptions may also be empty."
+                result = {"items":items,"cursor":self.latest_cursor,"warning":warning}
+            except Exception as error:
+                warning = self.explain(error)
+                if category == "subscriptions": warning = "Unfortunately we could not load your subscriptions. Check your YouTube sign-in in " + self.browser + " on the server PC. " + warning
+                result = {"items":[],"cursor":None,"warning":warning}
+            self.discover_cache[category] = (time.monotonic()+60, result)
+            while len(self.discover_cache)>24: self.discover_cache.pop(next(iter(self.discover_cache)))
+            return result
 
     def channel_videos(self, identifier, tab="videos"):
         with self.network_lock:
@@ -330,13 +397,12 @@ class YouTubeService:
             else: self.channel_search_attempt = now
             try:
                 params = {"search_query": query, "hl": "ru"}
-                if kind == "channels": params["sp"] = "EgIQAg=="
-                elif date != "any":
-                    import base64
-                    # YouTube SearchFilter protobuf: outer filters(2), upload_date(1).
-                    code = {"hour": 1, "today": 2, "week": 3, "month": 4, "year": 5}[date]
-                    params["sp"] = base64.b64encode(bytes([0x12, 2, 0x08, code])).decode("ascii")
-                items = self.fetch_cards("/results?" + urlencode(params), scope="channels" if kind == "channels" else "search")
+                import base64
+                fields = []
+                if date != "any": fields += [0x08, {"hour":1,"today":2,"week":3,"month":4,"year":5}[date]]
+                if kind != "all": fields += [0x10, {"videos":1,"channels":2,"playlists":3}[kind]]
+                if fields: params["sp"] = base64.b64encode(bytes([0x12,len(fields)]+fields)).decode("ascii")
+                items = self.fetch_cards("/results?" + urlencode(params), scope="channels" if kind == "channels" else "playlists" if kind == "playlists" else "search")
                 while len(self.search_cache) >= 12:
                     self.search_cache.pop(next(iter(self.search_cache)))
                 self.search_cache[key] = (time.monotonic() + 180, items, self.latest_cursor)
@@ -386,7 +452,7 @@ class YouTubeService:
                         if len(raw) > 8 * 1024 * 1024:
                             raise FeedParseError("Следующая страница слишком большая.")
                 data = json.loads(raw)
-                items = self.local_images(cards_from_data(data, 60, allow_empty=True, include_channels=page.get("scope") in {"search", "channels"}, channels_only=page.get("scope") == "channels"))
+                items = self.local_images(cards_from_data(data, 60, allow_empty=True, include_channels=page.get("scope") in {"search", "channels"}, channels_only=page.get("scope") == "channels", playlists_only=page.get("scope") == "playlists"))
                 cursor = self.register_cursor(continuation(data, next_page["endpoint"]), config, scope=page.get("scope", "home"))
                 result = {"items": items, "cursor": cursor, "warning": ""}
                 page["result"] = result
@@ -428,6 +494,10 @@ class YouTubeService:
             self.browser = browser
             self.default_quality = quality
             if changed:
+                self.marked_videos.clear()
+                self.discover_cache.clear()
+                self.topic_sources.clear()
+                self.topics = []
                 self.clear_session_cookies()
                 self.settings_generation += 1
                 self.feed = None
@@ -554,7 +624,13 @@ def run_stream(service, job, identifier, quality):
         update(job, channel_id=info.get("channel_id") or "", published=published,
                views=f"{views:,}".replace(",", " ") + " просмотров" if isinstance(views, int) else "")
         selected = info.get("requested_formats") or [info]
-        progressive = None if job.get("force_hls") else progressive_format(info, quality)
+        bundle = audio_bundle(info, job.get("ui_language", "en"))
+        multi = job.get("multi_audio", True) and len(bundle) > 1
+        if multi:
+            video = next(x for x in selected if x.get("vcodec") not in (None, "none"))
+            selected = [{**video, "acodec":"none"}] + bundle
+        update(job, multi_audio=multi, bundled_languages=[audio_language(f) for f in bundle], original_audio_language=next((audio_language(f) for f in bundle if original_audio(f)), ""))
+        progressive = None if job.get("force_hls") or multi else progressive_format(info, quality)
         common = dict(title=info.get("title") or "Видео", channel=info.get("channel") or info.get("uploader") or "",
                       channel_id=info.get("channel_id") or "", description=(info.get("description") or "")[:12000],
                       duration=info.get("duration") or 0, quality=(f"До {quality}p" if quality else "Авто · до 1080p"),
@@ -575,12 +651,19 @@ def run_stream(service, job, identifier, quality):
         ai = next((i for i, x in enumerate(selected) if x.get("acodec") not in (None, "none")), None)
         if vi is None or ai is None:
             raise ValueError("Не найдены совместимые видео и звук.")
-        command += ["-map", f"{vi}:v:0", "-map", f"{ai}:a:0",
-                    "-c:v", "copy", "-c:a", "aac", "-profile:a", "aac_low",
+        command += ["-map", f"{vi}:v:0"]
+        for i in ([1, 2] if multi else [ai]): command += ["-map", f"{i}:a:0"]
+        command += ["-c:v", "copy", "-c:a", "aac", "-profile:a", "aac_low",
                     "-b:a", "128k", "-ar", "48000", "-ac", "2",
                     "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event",
-                    "-hls_list_size", "0", "-hls_flags", "temp_file",
-                    "-hls_segment_filename", str(folder / "segment-%06d.ts"), str(playlist)]
+                    "-hls_list_size", "0", "-hls_flags", "temp_file"]
+        if multi:
+            mapping = " ".join(f"a:{i},agroup:audio,default:{'yes' if i == 0 else 'no'},language:{audio_language(f) or 'und'}" for i,f in enumerate(bundle))
+            command += ["-var_stream_map", mapping + " v:0,agroup:audio", "-master_pl_name", "index.m3u8",
+                        "-hls_segment_filename", str(folder / "segment-%v-%06d.ts"), str(folder / "track-%v.m3u8")]
+            playlist = folder / "track-2.m3u8"
+        else:
+            command += ["-hls_segment_filename", str(folder / "segment-%06d.ts"), str(playlist)]
         height = max((x.get("height") or 0 for x in selected), default=0)
         update(job, stage="buffering", message="Готовим первые фрагменты…",
                title=info.get("title") or "Видео", quality=(f"До {quality}p" if quality else "Авто · до 1080p"),
@@ -601,7 +684,9 @@ def run_stream(service, job, identifier, quality):
                     job["stop"].set()
                     break
                 seconds = playlist_seconds(playlist)
-                if seconds > 0:
+                if multi:
+                    seconds = min(playlist_seconds(folder / ("track-" + str(i) + ".m3u8")) for i in range(3))
+                if seconds > 0 and (folder / "index.m3u8").is_file():
                     values = dict(ready=True, buffered=round(seconds, 1), stage="streaming", message="Поток готов.")
                     if not state["ready"]:
                         values["startup_seconds"] = round(time.monotonic() - started, 1)
@@ -728,7 +813,7 @@ async def lifespan(app):
             await app.state.suggest_client.aclose()
 
 
-app = FastAPI(title="LightTube Recommendations BETA", lifespan=lifespan)
+app = FastAPI(title="LightTube", lifespan=lifespan)
 class InterfaceFiles(StaticFiles):
     async def get_response(self, path, scope):
         response = await super().get_response(path, scope)
@@ -823,6 +908,15 @@ class HistoryBody(BaseModel):
     token: str = Field(min_length=10, max_length=64)
     position: float = Field(ge=0, le=604800, allow_inf_nan=False)
     completed: bool = False
+    sync_youtube: bool = False
+
+
+@app.get("/api/discover")
+async def discover(request: Request, category: str = "music"):
+    service = request.app.state.youtube
+    if category not in {"music", "subscriptions"} and category not in service.topic_sources:
+        raise HTTPException(404, "Topic expired. Refresh recommendations.")
+    return await asyncio.to_thread(service.discover, category)
 
 
 @app.get("/api/history")
@@ -835,7 +929,7 @@ def get_history(request: Request):
 
 
 @app.post("/api/history")
-def record_history(body: HistoryBody, request: Request):
+async def record_history(body: HistoryBody, request: Request):
     state = request.app.state
     job = state.jobs.get(body.token)
     if not job:
@@ -860,6 +954,10 @@ def record_history(body: HistoryBody, request: Request):
         state.history.move_to_end(identifier)
         while len(state.history) > 100:
             state.history.popitem(last=False)
+    if body.sync_youtube and body.completed and body.position >= video["duration"] - 3:
+        task = asyncio.create_task(asyncio.to_thread(state.youtube.mark_completed, identifier, state.youtube.settings_generation))
+        state.tasks.add(task)
+        task.add_done_callback(state.tasks.discard)
     return {"ok": True}
 
 
@@ -1002,7 +1100,7 @@ async def playlist_items(identifier: str, request: Request):
 
 
 @app.get("/api/search")
-async def search(request: Request, q: str = "", type: Literal["all", "channels"] = "all", date: Literal["any", "hour", "today", "week", "month", "year"] = "any"):
+async def search(request: Request, q: str = "", type: Literal["all", "videos", "channels", "playlists"] = "all", date: Literal["any", "hour", "today", "week", "month", "year"] = "any"):
     q = q.strip()
     if not q or len(q) > 160:
         raise HTTPException(400, "Введи запрос от 1 до 160 символов.")
@@ -1025,6 +1123,8 @@ class PrepareBody(BaseModel):
     audio: str | None = Field(default=None, max_length=35, pattern=AUDIO_PATTERN)
     mode: Literal["auto", "hls"] = "auto"
     start_low: bool = False
+    ui_language: Literal["en", "ru"] = "en"
+    multi_audio: bool = True
 
 
 class PrefetchBody(BaseModel):
@@ -1086,7 +1186,7 @@ async def use_hls(token: str, request: Request):
     return {"ok": True}
 
 
-def create_job(state, identifier, quality, mode="auto", start_low=False, info=None, audio=None):
+def create_job(state, identifier, quality, mode="auto", start_low=False, info=None, audio=None, ui_language="en", multi_audio=True):
     token = secrets.token_urlsafe(24)
     folder = state.root / token
     folder.mkdir()
@@ -1097,6 +1197,8 @@ def create_job(state, identifier, quality, mode="auto", start_low=False, info=No
                "video_id": identifier, "title": "", "quality": "", "duration": 0,
                "channel": "", "channel_id": "", "published": "", "views": "", "description": "", "buffered": 0, "folder": str(folder), "log": str(folder / "ffmpeg.log"),
                "stream": f"/hls/{token}/index.m3u8"}}
+    job["multi_audio"] = multi_audio
+    job["ui_language"] = ui_language
     job["audio"] = state.youtube.default_audio if audio is None else audio
     job["start_low"] = start_low
     job["info_override"] = info
@@ -1142,7 +1244,7 @@ async def change_quality(token: str, body: UpgradeBody, request: Request):
         state.youtube.playback_pending.set()
         info = job.get("target_info") if time.monotonic() - job.get("target_info_at", 0) < 120 else None
         child = create_job(state, job["identifier"], body.quality,
-                           "hls" if job.get("force_hls") else "auto", info=info, audio=audio)
+                           "hls" if job.get("force_hls") else "auto", info=info, audio=audio, ui_language=job.get("ui_language", "en"), multi_audio=job.get("multi_audio", True))
         state.jobs[child]["promoted"] = False
         job["upgrade"] = child
         return {"id": child}
@@ -1155,13 +1257,20 @@ def reusable_hls(job, identifier, quality, audio, generation):
             or not (state.get("completed_media") or state.get("stage") == "complete")):
         return False
     try:
-        playlist = (job["folder"] / "index.m3u8").read_text(encoding="utf-8")
-        segments = [line.strip() for line in playlist.splitlines() if line.strip() and not line.startswith('#')]
-        return '#EXT-X-ENDLIST' in playlist and bool(segments) and all(
-            SEGMENT.fullmatch(name) and (job["folder"] / name).is_file() and (job["folder"] / name).stat().st_size > 0
-            for name in segments)
+        def complete_rendition(name):
+            if name != "index.m3u8" and not RENDITION.fullmatch(name): return False
+            playlist = (job["folder"] / name).read_text(encoding="utf-8")
+            if name == "index.m3u8" and "#EXT-X-STREAM-INF" in playlist:
+                renditions = set(re.findall(r'URI="(track-[0-9]{1,2}\.m3u8)"', playlist))
+                renditions.update(line.strip() for line in playlist.splitlines() if RENDITION.fullmatch(line.strip()))
+                return bool(renditions) and all(complete_rendition(path) for path in renditions)
+            segments = [line.strip() for line in playlist.splitlines() if line.strip() and not line.startswith('#')]
+            return '#EXT-X-ENDLIST' in playlist and bool(segments) and all(
+                SEGMENT.fullmatch(segment) and (job["folder"] / segment).is_file() and (job["folder"] / segment).stat().st_size > 0 for segment in segments)
+        return complete_rendition("index.m3u8")
     except (OSError, UnicodeError):
         return False
+
 
 
 @app.post("/api/prepare")
@@ -1183,7 +1292,8 @@ async def prepare(body: PrepareBody, request: Request):
         quality = state.youtube.default_quality if body.quality is None else body.quality
         audio = state.youtube.default_audio if body.audio is None else body.audio
         for token, cached in reversed(list(state.jobs.items())):
-            if reusable_hls(cached, identifier, quality, audio, state.youtube.settings_generation):
+            if (cached.get("ui_language", "en") == body.ui_language and cached.get("multi_audio", True) == body.multi_audio
+                    and reusable_hls(cached, identifier, quality, audio, state.youtube.settings_generation)):
                 state.jobs.pop(token)
                 state.jobs[token] = cached
                 cached["stop"].clear()
@@ -1199,7 +1309,7 @@ async def prepare(body: PrepareBody, request: Request):
             old_key = next(iter(state.jobs))
             old = state.jobs.pop(old_key)
             shutil.rmtree(old["folder"], ignore_errors=True)
-        return {"id": create_job(state, identifier, state.youtube.default_quality if body.quality is None else body.quality, body.mode, body.start_low, audio=body.audio)}
+        return {"id": create_job(state, identifier, state.youtube.default_quality if body.quality is None else body.quality, body.mode, body.start_low, audio=body.audio, ui_language=body.ui_language, multi_audio=body.multi_audio)}
 
 
 @app.post("/api/jobs/{token}/promote")
@@ -1240,7 +1350,7 @@ async def stop_job(token: str, request: Request):
 @app.get("/hls/{token}/{filename}")
 def hls_file(token: str, filename: str, request: Request):
     job = request.app.state.jobs.get(token)
-    if job is None or not (filename == "index.m3u8" or SEGMENT.fullmatch(filename)):
+    if job is None or not (filename == "index.m3u8" or RENDITION.fullmatch(filename) or SEGMENT.fullmatch(filename)):
         raise HTTPException(404)
     path = job["folder"] / filename
     if not path.is_file():

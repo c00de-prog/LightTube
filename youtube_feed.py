@@ -201,10 +201,36 @@ def parse_cards(html, limit=24):
     return cards_from_data(data, limit)
 
 
-def cards_from_data(data, limit=60, allow_empty=False, include_channels=False, channels_only=False):
+def playlist_card(renderer):
+    identifier = renderer.get("playlistId") or renderer.get("contentId") or ""
+    kind = renderer.get("contentType", "")
+    if not renderer.get("playlistId") and kind != "LOCKUP_CONTENT_TYPE_PLAYLIST": return None
+    if kind and kind != "LOCKUP_CONTENT_TYPE_PLAYLIST": return None
+    if not re.fullmatch(r"[A-Za-z0-9_-]{10,80}", identifier): return None
+    meta = renderer.get("metadata", {}).get("lockupMetadataViewModel", {})
+    title = text(renderer.get("title") or meta.get("title"))
+    if not title: return None
+    thumbs = [n.get("url", "") for n in walk(renderer.get("thumbnails") or renderer.get("thumbnail") or renderer.get("contentImage")) if n.get("url")]
+    return {"id":identifier, "kind":"playlist", "title":title,
+            "thumbnail":thumbs[-1] if thumbs else "", "channel":text(renderer.get("shortBylineText"))}
+
+
+def page_topics(data):
+    topics = []
+    for node in walk(data.get("contents", data) if isinstance(data, dict) else data):
+        chip = node.get("chipCloudChipRenderer")
+        if not isinstance(chip, dict): continue
+        browse = chip.get("navigationEndpoint", {}).get("browseEndpoint", {})
+        label = text(chip.get("text"))
+        if label and browse.get("browseId") and browse.get("params"):
+            topics.append({"label":label[:100], "browseId":browse["browseId"], "params":browse["params"]})
+    return topics[:24]
+
+
+def cards_from_data(data, limit=60, allow_empty=False, include_channels=False, channels_only=False, playlists_only=False):
     items, seen = [], set()
     # Stay inside visible contents, avoiding unrelated menus/player metadata.
-    for node in walk(data.get("contents", data)):
+    for node in walk(data.get("contents", data) if isinstance(data, dict) else data):
         card = None
         for key in ("videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "videoWithContextRenderer"):
             if isinstance(node.get(key), dict):
@@ -219,6 +245,14 @@ def cards_from_data(data, limit=60, allow_empty=False, include_channels=False, c
                     if found:
                         card = found
                         break
+        if not channels_only:
+            for key in ("playlistRenderer", "gridPlaylistRenderer", "lockupViewModel"):
+                if isinstance(node.get(key), dict):
+                    found = playlist_card(node[key])
+                    if found:
+                        card = found
+                        break
+        if playlists_only and card and card.get("kind") != "playlist": card = None
         if channels_only and card and card.get('kind') != 'channel':
             card = None
         if card and card["id"] not in seen:
@@ -291,9 +325,9 @@ def parse_page(html, scope="home", limit=60):
     data = initial_data(html)
     content = related_contents(data) if scope == "related" else data.get("contents", data)
     return {
-        "items": cards_from_data(content, limit, allow_empty=scope == "channels", include_channels=scope in {"search", "channels"}, channels_only=scope == "channels"),
+        "items": cards_from_data(content, limit, allow_empty=scope in {"channels", "playlists", "subscriptions"}, include_channels=scope in {"search", "channels"}, channels_only=scope == "channels", playlists_only=scope == "playlists"),
         "continuation": continuation(content, "next" if scope == "related" else "search" if scope in {"search", "channels"} else "browse"),
-        "config": page_config(html),
+        "config": page_config(html), "topics": page_topics(data),
     }
 
 

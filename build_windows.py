@@ -7,7 +7,7 @@ import sys
 import venv
 
 ROOT = Path(__file__).resolve().parent
-STATIC_FILES = ["index.html", "style.css", "app.js", "i18n.js", "intro.js", "hls.min.js", "compatibility.html", "lighttube-logo.png", "lighttube.ico"]
+STATIC_FILES = ["index.html", "style.css", "app.js", "i18n.js", "intro.js", "intro-dots.js", "hls.min.js", "compatibility.html", "lighttube-logo.png", "lighttube.ico", "site-logo.png", "favicon.svg"]
 
 
 def find_tool(name):

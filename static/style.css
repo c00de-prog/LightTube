@@ -191,3 +191,16 @@ body:not(.filters-open) #video-filters {display:none}
 .brand>span:not(.brand-logo-frame){line-height:1.15}
 .brand sup{align-self:flex-start;margin-top:2px;line-height:1.2}
 @media(max-width:600px){.brand-logo-frame{width:30px;height:30px;flex-basis:30px}.brand-logo-frame .brand-logo{width:52px;height:52px}}
+
+/* Workspace 0.4: compact library shelves and independent filter dialog. */
+.site-brand-icon{width:52px;height:34px;object-fit:cover;border-radius:9px}
+.profile{overflow:hidden}.profile img{width:100%;height:100%;object-fit:cover;border-radius:50%}
+.topic-chips{overflow:auto;flex-wrap:nowrap;padding:8px 0 16px}.topic-chips button{white-space:nowrap;flex-shrink:0}
+.continue-feed{display:flex;overflow-x:auto;gap:18px;padding:8px 0 18px;scroll-snap-type:x proximity}
+.continue-feed>.card{flex:0 0 260px;scroll-snap-align:start}#continue-section{margin:12px 0 26px}
+#continue-section .section-heading{margin-bottom:0}#continue-section h3{font-size:19px}
+#avatar-file{max-width:100%}.filter-dialog-heading{display:flex;justify-content:space-between;align-items:center;width:100%}
+body.filters-open::after{content:"";position:fixed;inset:0;background:#0009;z-index:79;pointer-events:none}
+#advanced-filters{position:fixed;z-index:80;top:20vh;left:50%;transform:translateX(-50%);width:min(720px,90vw);max-height:70vh;overflow:auto;box-shadow:0 24px 100px #000a;background:#202124;padding:24px}
+@media(max-width:900px),(hover:none){#filter-toggle,#advanced-filters{display:none!important}body.filters-open::after{display:none}}
+@media(prefers-reduced-motion:no-preference){.card{animation:shelf-appear .3s ease both}.settings-dialog{animation:shelf-appear .2s ease} @keyframes shelf-appear{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}}

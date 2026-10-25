@@ -195,6 +195,23 @@ def select_audio(info, preference='auto'):
                 _audio_tracks=sorted(tracks.values(), key=lambda t: t['label']))
 
 
+def audio_bundle(info, preferred_language="en"):
+    """At most two renditions: selected/UI language and original. No extra extraction."""
+    selected = info.get("requested_formats") or [info]
+    current = next((f for f in selected if f.get("acodec") not in (None,"none")), None)
+    available = usable_audio(info)
+    result = [current] if current else []
+    originals = [f for f in available if original_audio(f)]
+    preferred = [f for f in available if audio_language(f).split("-")[0] == preferred_language.split("-")[0]]
+    # Prefer audio-only formats and one encoding for each actual language.
+    for group in (originals, preferred):
+        if not group: continue
+        chosen = max(group, key=lambda f:(f.get("vcodec") in (None,"none"), f.get("abr") or f.get("tbr") or 0))
+        if not any(audio_language(f) == audio_language(chosen) for f in result): result.append(chosen)
+        if len(result)>=2: break
+    return result[:2]
+
+
 def startup_format(info, quality):
     """Select an optional <=360p H.264 preview from already extracted metadata."""
     selected = info.get('requested_formats') or [info]

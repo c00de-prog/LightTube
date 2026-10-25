@@ -12,7 +12,7 @@ import sys
 import threading
 import webbrowser
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 
 class TrayController:
@@ -23,6 +23,7 @@ class TrayController:
         self.icon = None
         self.thread = None
         self.ready = False
+        self.language = "en"
         self.stopped = False
 
     def hide(self):
@@ -45,8 +46,8 @@ class TrayController:
                 picture.thumbnail((64, 64))
             self.icon = pystray.Icon("LightTube", picture, "LightTube Server",
                 menu=pystray.Menu(
-                    pystray.MenuItem("Show LightTube", lambda icon, item: self.events.put(("show", None)), default=True),
-                    pystray.MenuItem("Quit LightTube", lambda icon, item: self.events.put(("quit", None)))))
+                    pystray.MenuItem(lambda item: "Показать LightTube" if self.language == "ru" else "Show LightTube", lambda icon, item: self.events.put(("show", None)), default=True),
+                    pystray.MenuItem(lambda item: "Завершить LightTube" if self.language == "ru" else "Quit LightTube", lambda icon, item: self.events.put(("quit", None)))))
             self.thread = threading.Thread(target=self._run, name="lighttube-tray", daemon=True)
             self.thread.start()
         except Exception as error:
@@ -138,7 +139,13 @@ def save_cache_folder(folder):
     target = host_settings_file()
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"cache_dir": folder}), encoding="utf-8")
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict): data = {}
+    data["cache_dir"] = folder
+    temporary.write_text(json.dumps(data), encoding="utf-8")
     temporary.replace(target)
 
 
@@ -188,11 +195,21 @@ def main():
         pass
     style = ttk.Style(root)
     style.theme_use("clam")
+    style.configure("TNotebook", background="#10131c", borderwidth=0)
+    style.configure("TNotebook.Tab", background="#1b2235", foreground="#cbd5e7", padding=(18, 10))
+    style.map("TNotebook.Tab", background=[("selected", "#303c60")], foreground=[("selected", "white")])
     style.configure("TFrame", background="#10131c")
     style.configure("TLabel", background="#10131c", foreground="#eef0fa", font=("Segoe UI", 11))
-    style.configure("TButton", font=("Segoe UI", 10), padding=10)
-    frame = ttk.Frame(root, padding=26)
-    frame.pack(fill="both", expand=True)
+    style.configure("TButton", font=("Segoe UI", 10), padding=10, background="#283651", foreground="white")
+    style.map("TButton", background=[("active", "#354a75")])
+    notebook = ttk.Notebook(root)
+    notebook.pack(fill="both", expand=True, padx=16, pady=16)
+    frame = ttk.Frame(notebook, padding=22)
+    console_frame = ttk.Frame(notebook, padding=18)
+    settings_frame = ttk.Frame(notebook, padding=22)
+    notebook.add(frame, text="Server")
+    notebook.add(console_frame, text="Console")
+    notebook.add(settings_frame, text="Settings")
     if logo is not None:
         ttk.Label(frame, image=logo).pack(anchor="w")
     ttk.Label(frame, text="LightTube", font=("Segoe UI", 27, "bold")).pack(anchor="w")
@@ -219,7 +236,7 @@ def main():
 
     def select_cache():
         nonlocal selected_cache
-        chosen = filedialog.askdirectory(parent=root, title="Choose temporary video folder",
+        chosen = filedialog.askdirectory(parent=root, title=translated("Choose temporary video folder"),
                                           initialdir=selected_cache or str(Path.home()))
         if not chosen:
             return
@@ -374,14 +391,14 @@ def main():
     ttk.Label(frame, text="If Windows asks, allow access on your private home network.",
               wraplength=540).pack(anchor="w")
     ttk.Button(controls, text="Minimize to tray", command=tray.hide).pack(side="left", padx=8)
-    cache_controls = ttk.Frame(frame)
+    cache_controls = ttk.Frame(settings_frame)
     cache_controls.pack(fill="x", pady=(12, 0))
     ttk.Label(cache_controls, text="Temporary video folder").pack(side="left")
     ttk.Button(cache_controls, text="Choose folder…", command=select_cache).pack(side="right")
-    ttk.Label(frame, textvariable=cache_text, wraplength=760).pack(anchor="w", pady=(5, 0))
-    ttk.Label(frame, text="Changes apply after Stop → Start. Temporary videos are removed on normal shutdown.",
+    ttk.Label(settings_frame, textvariable=cache_text, wraplength=760).pack(anchor="w", pady=(5, 0))
+    ttk.Label(settings_frame, text="Changes apply after Stop → Start. Temporary videos are removed on normal shutdown.",
               wraplength=760).pack(anchor="w", pady=(4, 0))
-    console_heading = ttk.Frame(frame)
+    console_heading = ttk.Frame(console_frame)
     console_heading.pack(fill="x", pady=(18, 6))
     ttk.Label(console_heading, text="Server console").pack(side="left")
 
@@ -396,10 +413,75 @@ def main():
 
     ttk.Button(console_heading, text="Clear", command=clear_console).pack(side="right")
     ttk.Button(console_heading, text="Copy log", command=copy_console).pack(side="right", padx=8)
-    console = ScrolledText(frame, height=14, bg="#080b12", fg="#cbd5e7",
+    console = ScrolledText(console_frame, height=14, bg="#080b12", fg="#cbd5e7",
                            insertbackground="#ffffff", font=("Consolas", 10),
                            relief="flat", borderwidth=8, wrap="word", state="disabled")
     console.pack(fill="both", expand=True)
+    translations = {
+        "Server":"Сервер", "Console":"Консоль", "Settings":"Настройки",
+        "Start server":"Запустить сервер", "Stop":"Остановить", "Open LightTube":"Открыть LightTube",
+        "Minimize to tray":"Свернуть в трей", "Choose folder…":"Выбрать папку…",
+        "Temporary video folder":"Папка временных видео", "Server console":"Консоль сервера",
+        "Clear":"Очистить", "Copy log":"Копировать журнал", "Language":"Язык",
+        "Stopped":"Остановлен", "Starting…":"Запуск…", "Running · port 8000":"Работает · порт 8000",
+        "System temporary folder":"Системная временная папка",
+        "Stopping… waiting for stream cleanup.":"Остановка… очистка временных видео.",
+        "Your PC is the server. You can hide this window to the tray.":"Этот ПК — сервер. Окно можно свернуть в трей.",
+        "TV / phone address (same home network):":"Адрес для ТВ / телефона в домашней сети:",
+        "If Windows asks, allow access on your private home network.":"При запросе Windows разреши доступ в частной домашней сети.",
+        "Changes apply after Stop → Start. Temporary videos are removed on normal shutdown.":"Изменения применяются после остановки и запуска. Временные видео удаляются при штатном выходе.",
+        "Folder saved. Stop and Start to apply.":"Папка сохранена. Останови и запусти сервер.",
+        "Folder saved. Press Start server.":"Папка сохранена. Нажми «Запустить сервер».",
+        "Choose temporary video folder":"Выбери папку временных видео",
+        "Show LightTube":"Показать LightTube", "Quit LightTube":"Завершить LightTube",
+    }
+    try:
+        saved_language = json.loads(host_settings_file().read_text(encoding="utf-8")).get("language", "en")
+    except (OSError, ValueError):
+        saved_language = "en"
+    language = tk.StringVar(value="Русский" if saved_language == "ru" else "English")
+    def translated(text):
+        return translations.get(text, text) if language.get() == "Русский" else text
+    original_status_set = status.set
+    def status_set(text):
+        original_status_set(translated(text))
+    status.set = status_set
+    ttk.Label(settings_frame, text="Language").pack(anchor="w", pady=(24, 8))
+    language_select = ttk.Combobox(settings_frame, textvariable=language, values=("English", "Русский"), state="readonly")
+    language_select.pack(anchor="w")
+    original_texts = {}
+    def apply_language(event=None):
+        def visit(widget):
+            try:
+                text = widget.cget("text")
+                if text:
+                    original = original_texts.setdefault(widget, text)
+                    widget.configure(text=translated(original))
+            except (tk.TclError, KeyError):
+                pass
+            for child in widget.winfo_children(): visit(child)
+        visit(root)
+        for i, title in enumerate(("Server", "Console", "Settings")):
+            notebook.tab(i, text=translated(title))
+        if not selected_cache: cache_text.set(translated("System temporary folder"))
+        current = status.get()
+        reverse = {v:k for k,v in translations.items()}
+        status.set(reverse.get(current, current))
+        # Change tray menu text without modifying the running tray loop.
+        tray.language = "ru" if language.get() == "Русский" else "en"
+        root.title(("Сервер LightTube " if tray.language == "ru" else "LightTube Server ") + VERSION)
+        if tray.icon and tray.ready:
+            try: tray.icon.update_menu()
+            except Exception: logging.exception("Could not refresh tray menu")
+        try:
+            data = json.loads(host_settings_file().read_text(encoding="utf-8")) if host_settings_file().exists() else {}
+            if not isinstance(data, dict): data = {}
+            data["language"] = tray.language
+            host_settings_file().parent.mkdir(parents=True, exist_ok=True)
+            host_settings_file().write_text(json.dumps(data), encoding="utf-8")
+        except (OSError, ValueError): logging.exception("Could not save language")
+    language_select.bind("<<ComboboxSelected>>", apply_language)
+    apply_language()
     def tk_exception(kind, value, traceback):
         logging.error("Interface error", exc_info=(kind, value, traceback))
     root.report_callback_exception = tk_exception

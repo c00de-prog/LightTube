@@ -5,6 +5,7 @@
     var session = null, hls = null, timer = null, epoch = 0;
     var attached = false, polling = false, preparing = false, duration = 0;
     var playbackError = false, currentVideo = null, endedFor = null, minimized = false;
+    var discoverItems = [], discoverCursor = null, discoverBusy = false, discoverCategory = "", discoverLabel = "", continueItems = [];
     var feedItems = [], searchItems = [], relatedItems = [], historyItems = [], history = {};
     var pendingFeed = null, feedBusy = false, feedLoaded = false, searchBusy = false, moreBusy = false;
     var feedCursor = null, searchCursor = null, relatedCursor = null, relatedBusy = false;
@@ -15,7 +16,7 @@
     var deliveryMode = null, deliveryFallback = false, directTimer = null, prefetchTimer = null, prefetchAt = 0, prefetchKey = "", openedAt = 0, firstFrameSeconds = null;
     var searchKind = "all", relatedMode = "all", authorItems = [], authorCursor = null, authorBusy = false, authorVideo = null, menuPage = "root", queuedSetting = null;
     var settingsView = "profile", relatedVideo = null, upgradeToken = null, upgradeTimer = null, upgrading = false, preview = null, previewTimer = null, resumeAt = null, resumePlaying = true;
-    var audioPreference = "auto", audioTracks = [], retryFullQuality = false, currentQualityInfo = "";
+    var originalAudioLanguage = "", audioPreference = "auto", audioTracks = [], retryFullQuality = false, currentQualityInfo = "";
     var nextVideoTimer = null, nextVideoCandidate = null, channelTab = "videos",
         resumeWatchActive = false, availableQualities = [], pendingResume = null,
         quality = 720, heartbeatBusy = false, settingsBusy = false, priorFocus = null;
@@ -24,6 +25,9 @@
     el("autoplay-next").checked = localPreferences.autoplay === true;
     el("developer-mode").checked = localPreferences.developer === true;
     el("ui-language").value = localPreferences.languageRevision === 2 && localPreferences.language === "ru" ? "ru" : "en";
+    el("intro-style").value = ["full","dots","calm","none"].indexOf(localPreferences.introStyle) >= 0 ? localPreferences.introStyle : "full";
+    el("intro-sound").checked = localPreferences.introSound !== false;
+    el("sync-watch").checked = localPreferences.syncWatch !== false;
     function localText(ru, en) { return el("ui-language").value === "en" ? en : ru; }
     function updateLocalPreferences() {
         var nickname = (localPreferences.nickname || "LightTube").trim();
@@ -32,6 +36,10 @@
         if (!/^#[0-9a-f]{6}$/i.test(localPreferences.avatarColor || "")) {
             var colors = ["#7c3aed","#be185d","#0369a1","#047857","#b45309","#4338ca","#a21caf","#0e7490"];
             localPreferences.avatarColor = colors[Math.floor(Math.random()*colors.length)];
+        }
+        if (/^data:image\/(?:webp|png|jpeg);base64,/.test(localPreferences.avatarImage || "")) {
+            el("account-profile").textContent = "";
+            var picture = document.createElement("img"); picture.alt = ""; picture.src = localPreferences.avatarImage; el("account-profile").appendChild(picture);
         }
         el("account-profile").style.background = localPreferences.avatarColor;
         el("account-profile").setAttribute("aria-label",nickname);
@@ -42,12 +50,71 @@
         [["ui-language-label","Язык интерфейса","Interface language"],["autoplay-label","Автоматически включать следующее видео","Play the next video automatically"],["developer-label","Для разработчика","Developer options"],["developer-toggle-label","Показывать диагностику и сведения о сервере","Show diagnostics and server information"]].forEach(function (x) { el(x[0]).textContent = localText(x[1], x[2]); });
         [["nav-home","Главная","Home"],["nav-history","История","History"],["nav-settings","Настройки","Settings"],["nav-diagnostics","Диагностика","Diagnostics"]].forEach(function (x) { el(x[0]).querySelector("span").textContent = localText(x[1], x[2]); });
         [["settings-quality","Максимальное качество","Maximum quality"],["settings-audio","Озвучка / язык звуковой дорожки","Audio language"]].forEach(function (x) { var n = document.querySelector('label[for="' + x[0] + '"]'); if (n) n.textContent = localText(x[1], x[2]); });
-        try { localStorage.setItem("lighttube-preferences", JSON.stringify({languageRevision:2,avatarColor:localPreferences.avatarColor,nickname:localPreferences.nickname || "",autoplay:el("autoplay-next").checked,developer:el("developer-mode").checked,language:el("ui-language").value})); } catch (ignored) {}
+        try { localStorage.setItem("lighttube-preferences", JSON.stringify({languageRevision:2,avatarImage:localPreferences.avatarImage,introStyle:el("intro-style").value,introSound:el("intro-sound").checked,syncWatch:el("sync-watch").checked,avatarColor:localPreferences.avatarColor,nickname:localPreferences.nickname || "",autoplay:el("autoplay-next").checked,developer:el("developer-mode").checked,language:el("ui-language").value})); } catch (ignored) {}
     }
     el("nickname").value = localPreferences.nickname || "";
     el("nickname").oninput = function () { localPreferences.nickname = this.value.trim().slice(0,40); updateLocalPreferences(); };
-    ["autoplay-next","developer-mode","ui-language"].forEach(function (id) { el(id).onchange = updateLocalPreferences; });
+    ["autoplay-next","developer-mode","ui-language","intro-style","intro-sound","sync-watch"].forEach(function (id) { el(id).onchange = updateLocalPreferences; });
     updateLocalPreferences();
+    el("avatar-file").onchange = function () {
+        var file = this.files && this.files[0]; if (!file) return;
+        var notice = el("avatar-status");
+        if (file.size > 10*1024*1024) { notice.textContent = localText("Фото должно быть не больше 10 МБ.","Choose an image smaller than 10 MB."); this.value=""; return; }
+        if (["image/png","image/jpeg","image/webp"].indexOf(file.type)<0) { notice.textContent=localText("Выбери PNG, JPEG или WebP.","Choose PNG, JPEG or WebP."); return; }
+        var url = URL.createObjectURL(file), image = new Image();
+        image.onload = function () {
+            URL.revokeObjectURL(url);
+            if (!image.width || !image.height || image.width*image.height>50000000) { notice.textContent=localText("Слишком большое разрешение фото.","Image dimensions are too large."); return; }
+            var canvas=document.createElement("canvas"); canvas.width=canvas.height=256;
+            var side=Math.min(image.width,image.height); canvas.getContext("2d").drawImage(image,(image.width-side)/2,(image.height-side)/2,side,side,0,0,256,256);
+            localPreferences.avatarImage=canvas.toDataURL("image/webp",.85); updateLocalPreferences();
+            notice.textContent=localText("Фото сохранено на этом устройстве.","Photo saved on this device.");
+        };
+        image.onerror=function(){URL.revokeObjectURL(url);notice.textContent=localText("Не удалось открыть фото.","Could not open this image.");}; image.src=url;
+    };
+    el("avatar-remove").onclick=function(){delete localPreferences.avatarImage;el("avatar-file").value="";updateLocalPreferences();};
+    function continueKey(){return "lighttube-continue:"+browser+":"+selectedProfile;}
+    function readContinue(){
+        try { var data=JSON.parse(localStorage.getItem(continueKey())||"[]"), now=Date.now();
+            continueItems=Array.isArray(data)?data.filter(function(v){return /^[A-Za-z0-9_-]{11}$/.test(v.id||"") && v.position>0 && v.duration>v.position+3 && now-v.savedAt<86400000 && now>=v.savedAt;}).slice(0,24):[];
+            localStorage.setItem(continueKey(),JSON.stringify(continueItems));
+        }catch(e){continueItems=[];}
+        return continueItems;
+    }
+    function saveContinue(completed){
+        if(!currentVideo || !currentVideo.id || !duration || player.currentTime<1)return;
+        readContinue(); continueItems=continueItems.filter(function(v){return v.id!==currentVideo.id;});
+        if(!completed && player.currentTime<duration-3)continueItems.unshift(Object.assign({},currentVideo,{duration:duration,position:player.currentTime,savedAt:Date.now(),completed:false}));
+        continueItems=continueItems.slice(0,24);
+        try{localStorage.setItem(continueKey(),JSON.stringify(continueItems));}catch(e){}
+    }
+    function paintContinue(){
+        readContinue(); el("continue-section").hidden=view!=="home" || !continueItems.length;
+        if(!el("continue-section").hidden) renderCards(continueItems,el("continue-feed"),false);
+    }
+    el("continue-clear").onclick=function(){try{localStorage.removeItem(continueKey());}catch(e){}paintContinue();};
+    setInterval(paintContinue,60000);
+    window.addEventListener("storage",function(e){if(e.key===continueKey())paintContinue();});
+    function paintTopics(topics){
+        var root=el("topic-chips");root.textContent="";
+        [{id:"home",label:localText("Все","All")},{id:"music",label:localText("Музыка","Music")}].concat(topics||[]).forEach(function(topic){
+            var b=document.createElement("button");b.className="chip";b.type="button";b.textContent=topic.label;
+            b.onclick=function(){if(topic.id==="home")setView("home");else openDiscover(topic.id,topic.label);};root.appendChild(b);
+        });
+    }
+    function openDiscover(category,label){
+        discoverCategory=category;discoverLabel=label;discoverBusy=true;discoverItems=[];discoverCursor=null;setView("discover");
+        var context=settingsGeneration;
+        api("GET","/api/discover?category="+encodeURIComponent(category),null,function(error,data){
+            if(context!==settingsGeneration || category!==discoverCategory)return;
+            discoverBusy=false;discoverItems=error?[]:data.items||[];discoverCursor=error?null:data.cursor;
+            if(view!=="discover")return;renderCurrent();el("feed-status").textContent=error || data.warning || "";
+            if(category==="subscriptions" && !discoverItems.length)el("feed-status").textContent=localText("К сожалению, не удалось вывести ваши подписки. Перепроверьте вход в YouTube в браузере "+browserName()+" на серверном ПК. Возможно, в подписках пока нет видео.","Unfortunately we could not display your subscriptions. Check your YouTube sign-in in "+browserName()+" on the server PC. The subscription feed may also be empty.");
+        });
+    }
+    el("nav-music").onclick=function(){openDiscover("music",localText("Музыка","Music"));};
+    el("nav-subscriptions").onclick=function(){openDiscover("subscriptions",localText("Подписки","Subscriptions"));};
+    paintTopics([]);
     el("offline-retry").onclick = heartbeat;
     var autoplayLabel = document.createElement("label"); autoplayLabel.className = "autoplay-control"; autoplayLabel.title = localText("Автопроигрывание","Autoplay");
     var autoplaySwitch = document.createElement("input"); autoplaySwitch.type = "checkbox"; autoplaySwitch.checked = el("autoplay-next").checked;
@@ -271,13 +338,14 @@
         if (!minimized && attached) section.scrollIntoView(true);
     }
     function recordHistory(completed, refresh) {
+        saveContinue(completed);
         if (!session || !currentVideo || (player.currentTime || 0) < 1) return;
         var token = session, server = serverId;
         history[currentVideo.id] = {id: currentVideo.id, title: currentVideo.title, channel: currentVideo.channel,
             channel_id: currentVideo.channel_id || "", duration: currentVideo.duration, position: player.currentTime || 0,
             completed: !!completed || !!(history[currentVideo.id] && history[currentVideo.id].completed)};
         if (filter !== "all") renderCurrent();
-        api("POST", "/api/history", {token: token, position: player.currentTime || 0, completed: !!completed}, function (error) {
+        api("POST", "/api/history", {token: token, position: player.currentTime || 0, completed: !!completed, sync_youtube:el("sync-watch").checked}, function (error) {
             if (!error && server === serverId) loadHistory(!!refresh);
         }, 10000);
     }
@@ -356,6 +424,7 @@
     }
     function attach(data) {
         deliveryMode = data.mode || "hls";
+        originalAudioLanguage = data.original_audio_language || "";
         audioTracks = data.audio_tracks || []; availableQualities = data.available_qualities || [];
         paintAudioOptions();
         el("audio-notice").hidden = !data.audio_warning;
@@ -462,13 +531,14 @@
     }
     function openVideo(url, fullQuality) {
         cancelNextVideo();
-        var item = feedItems.concat(searchItems, relatedItems, authorItems, historyItems, channelItems).filter(function (v) { return v.id === url; })[0];
+        var item = feedItems.concat(searchItems, relatedItems, authorItems, historyItems, channelItems, discoverItems, readContinue()).filter(function (v) { return v.id === url; })[0];
         clearTimeout(prefetchTimer); openedAt = Date.now(); firstFrameSeconds = null;
         stopSession(true); retryFullQuality = false; audioTracks = []; el("audio-notice").textContent = ""; loadingUrl = url; endedFor = null; preparing = true;
         var generation = epoch;
         resumeWatchActive = true;
         var idMatch = /(?:v=|youtu.be\/)([A-Za-z0-9_-]{11})/.exec(url);
-        var old = history[(item && item.id) || (idMatch && idMatch[1]) || url];
+        var lookupId=(item && item.id) || (idMatch && idMatch[1]) || url;
+        var old=readContinue().filter(function(v){return v.id===lookupId;})[0] || history[lookupId];
         if (old && !old.completed && old.position > 1) { pendingResume = old.position; }
         section.hidden = false; document.body.classList.add("watching"); section.classList.remove("is-mini");
         el("title").textContent = item ? item.title : "Открываем видео…";
@@ -479,7 +549,7 @@
         el("related-status").textContent = "Рекомендации к ролику появятся здесь. Сначала получаем адреса видео…";
         loading("Получаем адреса видео и звука…", "busy"); section.scrollIntoView(true);
         el("open").disabled = true; message("Получаем видео…", false); el("details").textContent = "";
-        api("POST", "/api/prepare", {url: url, quality: quality, mode: el("playback-mode").value, start_low: el("start-low").checked && !fullQuality, audio: audioPreference}, function (error, data) {
+        api("POST", "/api/prepare", {url: url, quality: quality, mode: el("playback-mode").value, start_low: el("start-low").checked && !fullQuality, audio: audioPreference, ui_language:el("ui-language").value}, function (error, data) {
             if (generation !== epoch) {
                 if (!error && data.id) api("POST", "/api/jobs/" + data.id + "/stop", null, function () {});
                 return;
@@ -562,6 +632,9 @@
     }
     el("next-cancel").onclick = cancelNextVideo; el("next-play").onclick = playNextVideo;
     el("filter-toggle").onclick = function () { var open = document.body.classList.toggle("filters-open"); this.setAttribute("aria-expanded",String(open)); el("advanced-filters").hidden = !open; };
+    el("filters-close").onclick=function(){document.body.classList.remove("filters-open");el("advanced-filters").hidden=true;el("filter-toggle").setAttribute("aria-expanded","false");};
+    el("search-type").onchange=function(){searchKind=this.value;if(lastQuery && view==="search")el("search-form").dispatchEvent(submitEvent());};
+    document.addEventListener("keydown",function(e){if(e.key==="Escape")el("filters-close").click();});
     el("filter-channel").onchange = function () { renderCurrent(); };
     el("upload-date").onchange = function () { if (lastQuery && view === "search" && searchKind !== "channels") el("search-form").dispatchEvent(submitEvent()); };
     Array.prototype.forEach.call(document.querySelectorAll("[data-channel-tab]"),function(b){ b.onclick = function () { if (activeChannel) openChannel(activeChannel.id,activeChannel.name,this.getAttribute("data-channel-tab")); }; });
@@ -578,8 +651,23 @@
             el("quality-select").value = String(quality); el("settings-quality").value = String(quality); paintAudioOptions();
             if (generation !== epoch || !session) return;
             if (upgrading) { queuedSetting = {quality: quality, audio: audioPreference}; message("Настройки сохранены. Применим после текущего переключения…", false); }
+            else if (name === "audio" && switchBundledAudio(audioPreference)) { paintAudioOptions(); }
             else changeQuality(quality, audioPreference);
         });
+    }
+    function switchBundledAudio(language){
+        if(language === "original") { if(!originalAudioLanguage)return false; language=originalAudioLanguage; }
+        if(hls && hls.audioTracks){
+            var tracks=hls.audioTracks, match=-1;
+            tracks.some(function(t,i){if(t.lang===language || (t.lang||"").split("-")[0]===language){match=i;return true;}return false;});
+            if(language==="auto")match=0;
+            if(match>=0){hls.audioTrack=match;message(localText("Переключаем звуковую дорожку…","Switching audio track…"),false);return true;}
+        }
+        if(player.audioTracks && player.audioTracks.length){
+            var found=false;for(var i=0;i<player.audioTracks.length;i++){var t=player.audioTracks[i];if(t.language===language)found=true;}
+            if(found){for(var j=0;j<player.audioTracks.length;j++)player.audioTracks[j].enabled=player.audioTracks[j].language===language;return true;}
+        }
+        return false;
     }
     function showPlayerMenu(page) {
         if (!attached) return;
@@ -634,9 +722,9 @@
                 listCard.onclick = function () {
                     var context = settingsGeneration, channelId = activeChannel && activeChannel.id;
                     api("GET","/api/playlists/" + item.id,null,function(error,data){
-                        if (context !== settingsGeneration || !activeChannel || activeChannel.id !== channelId || channelTab !== "playlists") return;
+                        if (context !== settingsGeneration) return;
                         if(error){message(error,true);return;}
-                        channelItems=data.items || [];channelCursor=null;renderCurrent();el("feed-heading").textContent=data.title;
+                        discoverItems=data.items||[];discoverCursor=null;discoverLabel=data.title;discoverBusy=false;setView("discover");
                     });
                 }; root.appendChild(listCard); return;
             }
@@ -652,7 +740,7 @@
             if (typeof item.duration === "number") {
                 var badge = document.createElement("span"); badge.className = "duration-badge"; badge.textContent = time(item.duration); thumbnail.appendChild(badge);
             }
-            var seen = history[item.id];
+            var seen = root === el("continue-feed") ? item : history[item.id];
             if (seen && seen.duration > 0) {
                 var progress = document.createElement("span"); progress.className = "history-progress";
                 progress.style.width = Math.min(100, seen.position / seen.duration * 100) + "%"; thumbnail.appendChild(progress);
@@ -687,10 +775,12 @@
         return visible.length;
     }
     function renderCurrent() {
+        paintContinue();
+        el("topic-chips").hidden = view !== "home" && view !== "discover";
         el("channel-tabs").hidden = view !== "channel";
         el("upload-date").disabled = view !== "search" || searchKind === "channels";
-        var items = view === "history" ? historyItems : view === "search" ? searchItems : view === "channel" ? channelItems : feedItems;
-        var busy = view === "search" ? searchBusy : view === "channel" ? channelBusy : view === "home" ? feedBusy : false;
+        var items = view === "discover" ? discoverItems : view === "history" ? historyItems : view === "search" ? searchItems : view === "channel" ? channelItems : feedItems;
+        var busy = view === "discover" ? discoverBusy : view === "search" ? searchBusy : view === "channel" ? channelBusy : view === "home" ? feedBusy : false;
         el("feed").hidden = busy; el("empty-state").classList.toggle("is-loading", busy); paintFilter();
         el("search-reset").hidden = !lastQuery; el("search-form").classList.toggle("has-query", !!lastQuery);
         var count = renderCards(items, el("feed"), true);
@@ -700,8 +790,10 @@
         el("search-tabs").hidden = view !== "search";
         el("video-filters").hidden = view === "search" && searchKind === "channels";
         el("search-all").className = "chip" + (searchKind === "all" ? " active" : "");
+        el("search-type").value=searchKind;
+        ["videos","playlists"].forEach(function(k){el("search-"+k).className="chip"+(searchKind===k?" active":"");});
         el("search-channels").className = "chip" + (searchKind === "channels" ? " active" : "");
-        el("load-more").hidden = view === "history" || (busy || !(view === "search" ? searchCursor : view === "channel" ? channelCursor : feedCursor));
+        el("load-more").hidden = view === "history" || (busy || !(view === "discover" ? discoverCursor : view === "search" ? searchCursor : view === "channel" ? channelCursor : feedCursor));
     }
     function browserName() {
         var option = el("settings-browser").querySelector('option[value="' + browser + '"]');
@@ -718,8 +810,9 @@
         view = next;
         el("channel-tabs").hidden = next !== "channel";
         el("nav-home").className = "nav-item" + (next === "home" ? " active" : "");
+        ["music","subscriptions"].forEach(function(k){el("nav-"+k).classList.toggle("active",next==="discover" && discoverCategory===k);});
         el("nav-history").className = "nav-item" + (next === "history" ? " active" : "");
-        el("feed-heading").textContent = next === "history" ? "История сеанса" : next === "search" ? "Результаты поиска" : next === "channel" ? "Канал" : "Рекомендации";
+        el("feed-heading").textContent = next === "discover" ? discoverLabel : next === "history" ? "История сеанса" : next === "search" ? "Результаты поиска" : next === "channel" ? "Канал" : "Рекомендации";
         el("feed-source").textContent = next === "history" ? "В памяти сервера · до перезапуска" : next === "search" ? "Поиск YouTube" : "Сессия: " + browserName();
         el("feed-status").className = "feed-status";
         if (next === "history") { el("feed-status").textContent = "История общая для устройств этого сервера. После его перезапуска она исчезнет."; loadHistory(true); }
@@ -736,6 +829,7 @@
             feedBusy = false; el("refresh-feed").disabled = false;
             if (error) { feedNotice = error; feedError = true; }
             else {
+                paintTopics(data.topics);
                 var items = data.items || [], ids = feedItems.map(function (item) { return item.id; });
                 var hasNew = items.some(function (item) { return ids.indexOf(item.id) < 0; });
                 if (!feedLoaded || !feedItems.length) {
@@ -767,7 +861,7 @@
         });
     }
     function loadMore(isRelated) {
-        var key = isRelated ? (relatedMode === "author" ? authorCursor : relatedCursor) : view === "search" ? searchCursor : view === "channel" ? channelCursor : feedCursor;
+        var key = isRelated ? (relatedMode === "author" ? authorCursor : relatedCursor) : view === "discover" ? discoverCursor : view === "search" ? searchCursor : view === "channel" ? channelCursor : feedCursor;
         if (!key || (isRelated ? relatedBusy || authorBusy : moreBusy)) return;
         var button = el(isRelated ? "more-related" : "load-more"), generation = epoch, targetView = view, targetMode = relatedMode, context = settingsGeneration;
         button.disabled = true;
@@ -785,7 +879,8 @@
                 else { merge(relatedItems, data.items || []); relatedCursor = data.cursor || null; }
                 renderRelated();
             } else {
-                if (view === "channel") { decorateAuthor(data.items || [], activeChannel.id, authorProfiles[activeChannel.id] || {title:activeChannel.name,avatar:""}); merge(channelItems, data.items || []); channelCursor = data.cursor || null; }
+                if (view === "discover") { merge(discoverItems,data.items||[]);discoverCursor=data.cursor||null; }
+                else if (view === "channel") { decorateAuthor(data.items || [], activeChannel.id, authorProfiles[activeChannel.id] || {title:activeChannel.name,avatar:""}); merge(channelItems, data.items || []); channelCursor = data.cursor || null; }
                 else if (view === "search") { merge(searchItems, data.items || []); searchCursor = data.cursor || null; }
                 else { merge(feedItems, data.items || []); feedCursor = data.cursor || null; }
                 renderCurrent();
@@ -887,7 +982,7 @@
             restoringUI = true;
             if (valid) {
                 el("playback-mode").value = saved.playbackMode === "hls" ? "hls" : "auto"; el("prefetch-enabled").checked = saved.prefetch !== false; el("start-low").checked = saved.startLow !== false;
-                searchKind = saved.searchKind === "channels" ? "channels" : "all";
+                searchKind = ["videos","channels","playlists"].indexOf(saved.searchKind)>=0 ? saved.searchKind : "all";
                 el("upload-date").value = ["any","hour","today","week","month","year"].indexOf(saved.uploadDate)>=0 ? saved.uploadDate : "any";
                 lastQuery = typeof saved.query === "string" ? saved.query.slice(0, 160) : ""; el("search-query").value = lastQuery;
                 filter = ["all", "watched"].indexOf(saved.filter) >= 0 ? saved.filter : "all";
@@ -1058,7 +1153,7 @@
         lastQuery = query; searchItems = []; searchCursor = null;
         searchBusy = true; var requestedKind = searchKind, context = settingsGeneration, button = this.querySelector("button"); button.disabled = true;
         setView("search"); rememberUI(false); el("feed-status").textContent = "Ищем «" + query + "»…";
-        api("GET", "/api/search?q=" + encodeURIComponent(query) + (searchKind === "channels" ? "&type=channels" : "&date=" + el("upload-date").value), null, function (error, data) {
+        api("GET", "/api/search?q=" + encodeURIComponent(query) + ("&type="+searchKind+"&date=" + el("upload-date").value), null, function (error, data) {
             button.disabled = false; if (context !== settingsGeneration) return;
             searchBusy = false; if (view !== "search" || requestedKind !== searchKind) return;
             if (error) { renderCurrent(); el("feed-status").textContent = error; return; }
@@ -1068,7 +1163,7 @@
     };
     el("description-toggle").onclick = function () { var expanded = el("description-box").classList.toggle("expanded"); this.textContent = expanded ? "Свернуть" : "…ещё"; };
     ["all", "author", "unwatched"].forEach(function (mode) { el("related-" + mode).onclick = function () { selectRelated(mode); }; });
-    ["all", "channels"].forEach(function (kind) { el("search-" + kind).onclick = function () { if (searchBusy || kind === searchKind) return; searchKind = kind; filter = "all"; paintFilter(); el("search-form").dispatchEvent(submitEvent()); }; });
+    ["all", "videos", "channels", "playlists"].forEach(function (kind) { el("search-" + kind).onclick = function () { if (searchBusy || kind === searchKind) return; searchKind = kind; filter = "all"; paintFilter(); el("search-form").dispatchEvent(submitEvent()); }; });
     document.addEventListener("click", function (event) { if (!el("player-menu").contains(event.target) && !el("player-settings").contains(event.target)) closePlayerMenu(); });
     document.addEventListener("keydown", function (event) {
         if (el("player-menu").hidden) return;
@@ -1173,6 +1268,7 @@
         });
     });
     window.addEventListener("pagehide", function () {
+        saveContinue(player.ended);
         rememberUI(false);
         if (!session || !navigator.sendBeacon) return;
         if (currentVideo && player.currentTime >= 1) {

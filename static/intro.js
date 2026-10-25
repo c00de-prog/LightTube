@@ -216,12 +216,12 @@
     const root = document.getElementById("welcome");
     if (!root) return;
     if (run) cleanup(run);
-    if (!styled) { const s = document.createElement("style"); s.textContent = CSS; document.head.appendChild(s); styled = true; }
+    if (!styled) { const s = document.createElement("style"); s.textContent = CSS; s.dataset.introStyle = "search"; document.head.appendChild(s); styled = true; }
     const L = TXT[lang(lng)];
     markup(root, nick, L); root.hidden = false; root.removeAttribute("style");
     const reduced = !!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
     const r = run = { id: ++seq, root: root, anims: [], timer: 0, audio: null, sound: false, ending: false };
-    r.onKey = e => { if (e.key === "Escape" || e.key === "Enter" || e.key === " ") finish(); };
+    r.onKey = e => { if (e.key === "Escape" || ((e.key === "Enter" || e.key === " ") && e.target.tagName !== "BUTTON")) finish(); };
     if (!root.animate) {                         // совсем старый браузер: готовый кадр логотипа без звука
       root.classList.add("lt-css-fallback", "lt-static"); r.timer = setTimeout(() => cleanup(r), 3200); root.onclick = () => cleanup(r); return;
     }
@@ -229,7 +229,9 @@
     const an = (el, kf, o) => { const a = el.animate(kf, Object.assign({ fill: "forwards", easing: EXPO }, o)); r.anims.push(a); return a; };
     const at = t => (LEAD + t) * 1000;
     // «Уменьшить анимацию» в ОС: заставка всё равно играет, но без тряски, вспышки на весь экран, наезда камеры и частиц
-    const calm = reduced;
+    let prefs = {}; try { prefs = JSON.parse(localStorage.getItem("lighttube-preferences") || "{}"); } catch (e) {}
+    if (prefs.introStyle === "none") { cleanup(r); return; }
+    const calm = reduced || prefs.introStyle === "calm";
 
     const S = $(".lt-markbox").offsetWidth, gap = parseFloat(getComputedStyle($(".lt-row")).columnGap) || 16;
     const PW = Math.min(root.clientWidth * .86, 620), PH = 62, pill = $(".lt-pill"), pin = $(".lt-pin"), rows = $$(".lt-sg");
@@ -277,7 +279,7 @@
     }
 
     // звук привязан к тому же нулю времени; задержку устройства вывода вычитаем
-    const zero = performance.now() + LEAD * 1000, a = r.audio = (function () { try { return audioKit(); } catch (e) { return null; } })();
+    const zero = performance.now() + LEAD * 1000, a = r.audio = (function () { if (prefs.introSound === false) return null; try { return audioKit(); } catch (e) { return null; } })();
     if (!calm) fx(r, root, zero);
     const go = () => {
       if (run !== r || r.sound || r.ending || a.ctx.state !== "running") return;
@@ -290,13 +292,42 @@
       if (a.ctx.state === "running") go();
       else { a.ctx.resume().catch(() => {}); setTimeout(() => { if (run === r && !r.sound) $(".lt-hint").hidden = false; }, 400); }
     }
+    const soundButton = document.createElement("button");
+    soundButton.type = "button";
+    soundButton.className = "lt-sound-button";
+    soundButton.textContent = lang(lng) === "ru" ? "Включить звук" : "Enable sound";
+    soundButton.style.cssText = "position:absolute;bottom:26px;left:50%;transform:translateX(-50%);z-index:10;padding:12px 20px;border-radius:24px;border:1px solid #7184b3;background:#141c32;color:white;cursor:pointer";
+    soundButton.hidden = !a || a.ctx.state === "running";
+    soundButton.onclick = e => { e.stopPropagation(); if (!a) return; a.ctx.resume().then(() => { go(); soundButton.hidden = a.ctx.state === "running"; }).catch(() => {}); };
+    root.appendChild(soundButton);
+    if (a) a.ctx.addEventListener("statechange", () => { soundButton.hidden = a.ctx.state === "running"; });
     // первый тап включает звук (браузер требует жест), следующий пропускает заставку
-    root.onclick = () => { if (a && !r.sound) { a.ctx.resume().catch(() => {}); } else finish(); };
+    root.onclick = () => { if (a && !r.sound) { a.ctx.resume().then(go).catch(() => {}); } else finish(); };
     document.addEventListener("keydown", r.onKey);
     r.timer = setTimeout(finish, at(T.end));
   }
 
-  window.LightTubeWelcome = { show: show, skip: finish };
+  window.LightTubeSearchWelcome = {show:show, skip:finish, stop:()=>{if(run){if(run.audio)run.audio.ctx.close().catch(()=>{});cleanup(run);}}};
+})();
+
+/* Select a supplied intro without mixing its stylesheet or audio context. */
+(function(){
+  let active=null;
+  window.LightTubeWelcome={
+    show:function(nick,lng){
+      if(active && active.stop)active.stop();
+      let prefs={};try{prefs=JSON.parse(localStorage.getItem("lighttube-preferences")||"{}");}catch(e){}
+      const root=document.getElementById("welcome");
+      if(prefs.introStyle==="none"){root.hidden=true;return;}
+      const dots=prefs.introStyle==="dots" && window.LightTubeDotsWelcome;
+      active=dots?window.LightTubeDotsWelcome:window.LightTubeSearchWelcome;
+      const key=dots?"dots":"search";
+      document.querySelectorAll("style[data-intro-style]").forEach(s=>{s.disabled=s.dataset.introStyle!==key;});
+      active.show(nick,lng);
+      document.querySelectorAll("style[data-intro-style]").forEach(s=>{s.disabled=s.dataset.introStyle!==key;});
+    },
+    skip:function(){if(active)active.skip();}
+  };
 })();
 
 /* Автозапуск: заставка идёт сразу при загрузке страницы, до показа ленты рекомендаций. */
